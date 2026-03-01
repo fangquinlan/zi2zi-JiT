@@ -1,4 +1,4 @@
-git config --global user.name<p align="center">
+<p align="center">
   <img src="assets/logo.svg" alt="zi2zi-JiT logo" width="200">
 </p>
 
@@ -7,3 +7,4 @@ git config --global user.name<p align="center">
 <p align="center">
   <img src="assets/showcase.png" alt="showcase">
 </p>
+g
