@@ -178,6 +178,25 @@ python generate_chars.py \
     --output_dir run/generated_chars/
 ```
 
+**Notes for `generate_chars.py`:**
+
+- Supported samplers are `euler`, `heun`, and `ab2`.
+- If `--num_sampling_steps` is not set, the script uses method-specific defaults:
+  `euler -> 20`, `heun -> 50`, `ab2 -> 20`.
+- If neither `--sampling_method` nor `--num_sampling_steps` is overridden, the script keeps the checkpoint's saved inference settings.
+- Current recommended fast setting: `--sampling_method ab2 --cfg 2.6` and let the default `20` steps apply.
+- `heun-50` is kept as a conservative legacy/reference baseline. In the current 50-sample MPS benchmark, `ab2-20` and `euler-20` were both faster and scored better than `heun-50` on SSIM, LPIPS, and L1.
+
+Example fast generation command:
+
+```bash
+python generate_chars.py \
+    --checkpoint run/lora_ft_sample_single/checkpoint-last.pth \
+    --test_npz   data/sample_dataset/test.npz \
+    --output_dir run/generated_chars_ab2/ \
+    --sampling_method ab2
+```
+
 ### Metrics
 
 Compute pairwise metrics (SSIM, LPIPS, L1, FID) on the generated comparison grids:

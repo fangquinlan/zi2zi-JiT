@@ -174,6 +174,25 @@ python generate_chars.py \
     --output_dir run/generated_chars/
 ```
 
+**`generate_chars.py` 说明：**
+
+- 当前支持的采样器为 `euler`、`heun` 和 `ab2`。
+- 如果不指定 `--num_sampling_steps`，脚本会按采样器使用默认步数：
+  `euler -> 20`、`heun -> 50`、`ab2 -> 20`。
+- 如果既不覆盖 `--sampling_method`，也不覆盖 `--num_sampling_steps`，脚本会沿用 checkpoint 中保存的推理配置。
+- 当前推荐的快速生成设置为：`--sampling_method ab2 --cfg 2.6`，并使用默认的 `20` 步。
+- `heun-50` 目前更适合作为保守的历史/参考基线。在当前的 50 样本 MPS 基准中，`ab2-20` 和 `euler-20` 在 SSIM、LPIPS 和 L1 上都优于 `heun-50`，同时速度也更快。
+
+快速生成示例：
+
+```bash
+python generate_chars.py \
+    --checkpoint run/lora_ft_sample_single/checkpoint-last.pth \
+    --test_npz   data/sample_dataset/test.npz \
+    --output_dir run/generated_chars_ab2/ \
+    --sampling_method ab2
+```
+
 ### 指标计算
 
 在生成的对比网格上计算成对指标（SSIM、LPIPS、L1、FID）：

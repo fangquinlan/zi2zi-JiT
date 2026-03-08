@@ -94,6 +94,8 @@ class Denoiser(nn.Module):
             stepper = self._euler_step
         elif self.method == "heun":
             stepper = self._heun_step
+        elif self.method == "ab2":
+            return self._ab2_generate(z, timesteps, sampling_context)
         else:
             raise NotImplementedError
 
@@ -160,6 +162,23 @@ class Denoiser(nn.Module):
         v_pred = 0.5 * (v_pred_t + v_pred_t_next)
         z_next = z + (t_next - t) * v_pred
         return z_next
+
+    @torch.no_grad()
+    def _ab2_generate(self, z, timesteps, sampling_context):
+        if self.steps <= 1:
+            return self._euler_step(z, timesteps[0], timesteps[1], sampling_context)
+
+        v_prev = self._forward_sample(z, timesteps[0], sampling_context)
+        z = z + (timesteps[1] - timesteps[0]) * v_prev
+
+        for i in range(1, self.steps):
+            t = timesteps[i]
+            t_next = timesteps[i + 1]
+            v_curr = self._forward_sample(z, t, sampling_context)
+            z = z + (t_next - t) * (1.5 * v_curr - 0.5 * v_prev)
+            v_prev = v_curr
+
+        return z
 
     @torch.no_grad()
     def update_ema(self):

@@ -34,6 +34,13 @@ import util.misc as misc
 from util.lora_utils import inject_lora, _is_lora_state_dict
 
 
+DEFAULT_STEPS_BY_METHOD = {
+    'euler': 20,
+    'heun': 50,
+    'ab2': 20,
+}
+
+
 def get_args_parser():
     parser = argparse.ArgumentParser('JiT Evaluation', add_help=False)
 
@@ -60,9 +67,9 @@ def get_args_parser():
     parser.add_argument('--cfg', type=float, default=None,
                         help='Classifier-free guidance scale (default: from checkpoint, else 4.0)')
     parser.add_argument('--num_sampling_steps', type=int, default=None,
-                        help='Number of ODE sampling steps (default: from checkpoint, else 50)')
+                        help='Number of ODE sampling steps (default: method-specific when overriding sampler, else from checkpoint)')
     parser.add_argument('--sampling_method', type=str, default=None,
-                        choices=['euler', 'heun'],
+                        choices=['euler', 'heun', 'ab2'],
                         help='ODE solver method (default: from checkpoint, else heun)')
     parser.add_argument('--interval_min', type=float, default=None,
                         help='CFG interval minimum (default: from checkpoint, else 0.0)')
@@ -220,9 +227,14 @@ def main(args):
     model.eval()
 
     # Resolve generation parameters: CLI override > checkpoint args > hardcoded default
-    args.cfg = args.cfg if args.cfg is not None else getattr(ckpt_args, 'cfg', 4.0)
-    args.num_sampling_steps = args.num_sampling_steps if args.num_sampling_steps is not None else getattr(ckpt_args, 'num_sampling_steps', 50)
     args.sampling_method = args.sampling_method if args.sampling_method is not None else getattr(ckpt_args, 'sampling_method', 'heun')
+    default_steps = DEFAULT_STEPS_BY_METHOD[args.sampling_method]
+    args.cfg = args.cfg if args.cfg is not None else getattr(ckpt_args, 'cfg', 4.0)
+    if args.num_sampling_steps is None:
+        if args.sampling_method == getattr(ckpt_args, 'sampling_method', None):
+            args.num_sampling_steps = getattr(ckpt_args, 'num_sampling_steps', default_steps)
+        else:
+            args.num_sampling_steps = default_steps
     args.interval_min = args.interval_min if args.interval_min is not None else getattr(ckpt_args, 'interval_min', 0.0)
     args.interval_max = args.interval_max if args.interval_max is not None else getattr(ckpt_args, 'interval_max', 1.0)
 
