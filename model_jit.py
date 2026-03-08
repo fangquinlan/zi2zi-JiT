@@ -102,7 +102,7 @@ class LabelEmbedder(nn.Module):
             torch.ones(1, 3, content_image_size, content_image_size)
         )
 
-    def forward(self, labels, category_drop_prob=0.4):
+    def encode(self, labels, category_drop_prob=0.4):
         font_labels, char_labels, style_images, content_images = labels
 
         if self.training and category_drop_prob > 0:
@@ -124,6 +124,9 @@ class LabelEmbedder(nn.Module):
 
         combined_emb = font_emb + style_emb + content_emb
         return combined_emb, font_emb, content_emb, style_emb
+
+    def forward(self, labels, category_drop_prob=0.4):
+        return self.encode(labels, category_drop_prob=category_drop_prob)
 
 
 def scaled_dot_product_attention(query, key, value, dropout_p=0.0) -> torch.Tensor:
@@ -372,9 +375,18 @@ class JiT(nn.Module):
         t: (N,)
         y: (N,)
         """
+        conditioning = self.y_embedder(y)
+        return self.forward_with_conditioning(x, t, conditioning)
+
+    def forward_with_conditioning(self, x, t, conditioning):
+        """
+        x: (N, C, H, W)
+        t: (N,)
+        conditioning: tuple returned by LabelEmbedder
+        """
         # class and time embeddings
         t_emb = self.t_embedder(t)
-        y_emb, font_emb, content_emb, style_emb = self.y_embedder(y)
+        y_emb, font_emb, content_emb, style_emb = conditioning
         c = t_emb + y_emb
 
         # forward JiT

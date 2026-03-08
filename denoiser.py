@@ -88,6 +88,7 @@ class Denoiser(nn.Module):
         bsz = font_labels.size(0)
         z = self.noise_scale * torch.randn(bsz, 3, self.img_size, self.img_size, device=device)
         timesteps = torch.linspace(0.0, 1.0, self.steps+1, device=device).view(-1, *([1] * z.ndim)).expand(-1, bsz, -1, -1, -1)
+        sampling_context = self._prepare_sampling_context(labels)
 
         if self.method == "euler":
             stepper = self._euler_step
@@ -100,27 +101,40 @@ class Denoiser(nn.Module):
         for i in range(self.steps - 1):
             t = timesteps[i]
             t_next = timesteps[i + 1]
-            z = stepper(z, t, t_next, labels)
+            z = stepper(z, t, t_next, sampling_context)
         # last step euler
-        z = self._euler_step(z, timesteps[-2], timesteps[-1], labels)
+        z = self._euler_step(z, timesteps[-2], timesteps[-1], sampling_context)
         return z
 
     @torch.no_grad()
-    def _forward_sample(self, z, t, labels):
-        font_labels, char_labels, style_images, content_images = labels
+    def _prepare_sampling_context(self, labels):
+        font_labels, char_labels, _, _ = labels
 
-        # conditional
-        x_cond = self.net(z, t.flatten(), labels)
-        v_cond = (x_cond - z) / (1.0 - t).clamp_min(self.t_eps)
-
-        # unconditional
+        cond = self.net.y_embedder.encode(labels)
         null_labels = (
             torch.full_like(font_labels, self.num_fonts),
             torch.full_like(char_labels, self.num_chars),
-            torch.ones_like(style_images),
-            torch.ones_like(content_images),
+            None,
+            None,
         )
-        x_uncond = self.net(z, t.flatten(), null_labels)
+        uncond = self.net.y_embedder.encode(null_labels)
+
+        return {
+            "cond": cond,
+            "uncond": uncond,
+        }
+
+    @torch.no_grad()
+    def _forward_sample(self, z, t, sampling_context):
+        cond = sampling_context["cond"]
+        uncond = sampling_context["uncond"]
+
+        # conditional
+        x_cond = self.net.forward_with_conditioning(z, t.flatten(), cond)
+        v_cond = (x_cond - z) / (1.0 - t).clamp_min(self.t_eps)
+
+        # unconditional
+        x_uncond = self.net.forward_with_conditioning(z, t.flatten(), uncond)
         v_uncond = (x_uncond - z) / (1.0 - t).clamp_min(self.t_eps)
 
         # cfg interval
@@ -131,17 +145,17 @@ class Denoiser(nn.Module):
         return v_uncond + cfg_scale_interval * (v_cond - v_uncond)
 
     @torch.no_grad()
-    def _euler_step(self, z, t, t_next, labels):
-        v_pred = self._forward_sample(z, t, labels)
+    def _euler_step(self, z, t, t_next, sampling_context):
+        v_pred = self._forward_sample(z, t, sampling_context)
         z_next = z + (t_next - t) * v_pred
         return z_next
 
     @torch.no_grad()
-    def _heun_step(self, z, t, t_next, labels):
-        v_pred_t = self._forward_sample(z, t, labels)
+    def _heun_step(self, z, t, t_next, sampling_context):
+        v_pred_t = self._forward_sample(z, t, sampling_context)
 
         z_next_euler = z + (t_next - t) * v_pred_t
-        v_pred_t_next = self._forward_sample(z_next_euler, t_next, labels)
+        v_pred_t_next = self._forward_sample(z_next_euler, t_next, sampling_context)
 
         v_pred = 0.5 * (v_pred_t + v_pred_t_next)
         z_next = z + (t_next - t) * v_pred
