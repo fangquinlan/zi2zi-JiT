@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+MODEL_FOLDER_URL = "https://drive.google.com/drive/folders/1QJi2ihxDBK2NF-jCE07g59YwuUTAd-iY"
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -41,6 +43,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--resume", default="")
     parser.add_argument("--max-chars-per-font", type=int, default=None)
+    parser.add_argument("--auto-download-checkpoint", action="store_true")
+    parser.add_argument("--no-auto-download-checkpoint", action="store_false", dest="auto_download_checkpoint")
+    parser.set_defaults(auto_download_checkpoint=True)
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -53,6 +58,43 @@ def load_dataset_info(dataset_dir: Path) -> dict:
         )
     with open(dataset_info_path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def import_or_install_gdown():
+    try:
+        import gdown  # type: ignore
+        return gdown
+    except ImportError:
+        print("`gdown` not found. Installing it automatically...")
+        subprocess.run([sys.executable, "-m", "pip", "install", "gdown"], check=True)
+        import gdown  # type: ignore
+        return gdown
+
+
+def maybe_download_checkpoint(base_checkpoint: Path, dry_run: bool) -> None:
+    if base_checkpoint.is_file():
+        return
+    if dry_run:
+        return
+
+    base_checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    gdown = import_or_install_gdown()
+
+    print(f"Checkpoint not found locally. Downloading from: {MODEL_FOLDER_URL}")
+    downloaded = gdown.download_folder(
+        url=MODEL_FOLDER_URL,
+        output=str(base_checkpoint.parent),
+        quiet=False,
+        use_cookies=False,
+        remaining_ok=True,
+    )
+    if not downloaded:
+        raise RuntimeError("gdown did not download any files from the model folder.")
+    if not base_checkpoint.is_file():
+        downloaded_names = ", ".join(Path(path).name for path in downloaded)
+        raise FileNotFoundError(
+            f"Downloaded files do not include {base_checkpoint.name}. Got: {downloaded_names}"
+        )
 
 
 def main() -> None:
@@ -73,6 +115,8 @@ def main() -> None:
         raise FileNotFoundError(f"test.npz not found: {test_npz}")
     if not train_script.is_file():
         raise FileNotFoundError(f"Training entrypoint not found: {train_script}")
+    if not base_checkpoint.is_file() and args.auto_download_checkpoint:
+        maybe_download_checkpoint(base_checkpoint, dry_run=args.dry_run)
     if not base_checkpoint.is_file() and not args.dry_run:
         raise FileNotFoundError(f"Base checkpoint not found: {base_checkpoint}")
 
@@ -129,6 +173,8 @@ def main() -> None:
     print(f"  checkpoint  = {base_checkpoint}")
     if not base_checkpoint.is_file():
         print("  checkpoint_status = missing on this machine (dry-run only)")
+        if args.auto_download_checkpoint:
+            print(f"  checkpoint_source = {MODEL_FOLDER_URL}")
     print("\nTraining command:")
     print(command_text)
 
