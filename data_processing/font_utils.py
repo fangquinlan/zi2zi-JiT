@@ -20,6 +20,13 @@ CJK_RANGES = [
     (0x2F800, 0x2FA1F),  # Compatibility Supplement
 ]
 
+KANA_RANGES = [
+    (0x3040, 0x309F),    # Hiragana
+    (0x30A0, 0x30FF),    # Katakana
+    (0x31F0, 0x31FF),    # Katakana Phonetic Extensions
+    (0xFF66, 0xFF9D),    # Halfwidth Katakana
+]
+
 
 def ensure_output_directory(output_path: str) -> Path:
     path = Path(output_path)
@@ -48,6 +55,13 @@ def load_font(font_path: str) -> Tuple[TTFont, Path]:
 
 def is_cjk_codepoint(codepoint: int) -> bool:
     for start, end in CJK_RANGES:
+        if start <= codepoint <= end:
+            return True
+    return False
+
+
+def is_kana_codepoint(codepoint: int) -> bool:
+    for start, end in KANA_RANGES:
         if start <= codepoint <= end:
             return True
     return False
@@ -148,17 +162,36 @@ class GlyphRenderer:
 
     def _get_sample_codepoints(self) -> list[int]:
         available = []
+        seen = set()
+
+        def extend_from_codepoints(codepoints) -> bool:
+            for cp in codepoints:
+                if cp in seen or cp not in self._cmap or not has_valid_outline(self._tt_font, cp):
+                    continue
+                available.append(cp)
+                seen.add(cp)
+                if len(available) >= self.sample_size:
+                    return True
+            return False
 
         for char in self.SAMPLE_CHARS:
             cp = ord(char)
-            if cp in self._cmap:
-                available.append(cp)
-            if len(available) >= self.sample_size:
+            if extend_from_codepoints([cp]):
                 return available[:self.sample_size]
 
         if len(available) < self.sample_size:
-            cjk_in_font = [cp for cp in self._cmap.keys() if is_cjk_codepoint(cp) and cp not in set(available)]
-            available.extend(cjk_in_font[: max(0, self.sample_size - len(available))])
+            kana_in_font = sorted(cp for cp in self._cmap.keys() if is_kana_codepoint(cp))
+            if extend_from_codepoints(kana_in_font):
+                return available[:self.sample_size]
+
+        if len(available) < self.sample_size:
+            cjk_in_font = sorted(cp for cp in self._cmap.keys() if is_cjk_codepoint(cp))
+            if extend_from_codepoints(cjk_in_font):
+                return available[:self.sample_size]
+
+        if len(available) < self.sample_size:
+            any_valid = sorted(self._cmap.keys())
+            extend_from_codepoints(any_valid)
 
         return available[:self.sample_size]
 

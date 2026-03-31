@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageFile, ImageOps, UnidentifiedImageError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -32,6 +32,9 @@ from data_processing.pipeline import create_combined_image, create_test_npz
 LOGGER = logging.getLogger("prepare_mixed_finetune_dataset")
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 MIN_TRAIN_CHARS = 9
+
+# Some scanned glyph JPEGs are slightly truncated but still visually usable.
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 def parse_args() -> argparse.Namespace:
@@ -188,12 +191,22 @@ def build_ref_grid_from_renderer(
 
 
 def load_target_image(path: Path, invert_images: bool, resolution: int) -> Image.Image:
-    img = Image.open(path).convert("RGB")
+    with Image.open(path) as opened:
+        img = opened.convert("RGB")
     if invert_images:
         img = ImageOps.invert(img)
     if img.size != (resolution, resolution):
         img = img.resize((resolution, resolution), Image.LANCZOS)
     return img
+
+
+def validate_target_image(path: Path) -> Optional[str]:
+    try:
+        with Image.open(path) as opened:
+            opened.load()
+    except (OSError, ValueError, UnidentifiedImageError) as exc:
+        return str(exc)
+    return None
 
 
 def build_ref_grid_from_paths(
@@ -410,6 +423,10 @@ def collect_image_glyphs(glyph_dir: Path, source_codepoints: set[int]) -> tuple[
         if cp not in source_codepoints:
             skipped.append(f"{path.name}: missing from source font")
             continue
+        image_error = validate_target_image(path)
+        if image_error is not None:
+            skipped.append(f"{path.name}: unreadable image ({image_error})")
+            continue
         glyph_map[cp] = path
 
     return glyph_map, sorted(glyph_map.keys()), skipped
@@ -470,9 +487,13 @@ def prepare_image_target(
         if source_img is None:
             failed_train += 1
             continue
-        target_img = load_target_image(glyph_map[cp], invert_images=invert_images, resolution=resolution)
-        ref_grid_1 = build_ref_grid_from_paths(glyph_map, refs[:4], invert_images=invert_images)
-        ref_grid_2 = build_ref_grid_from_paths(glyph_map, refs[4:], invert_images=invert_images)
+        try:
+            target_img = load_target_image(glyph_map[cp], invert_images=invert_images, resolution=resolution)
+            ref_grid_1 = build_ref_grid_from_paths(glyph_map, refs[:4], invert_images=invert_images)
+            ref_grid_2 = build_ref_grid_from_paths(glyph_map, refs[4:], invert_images=invert_images)
+        except (OSError, ValueError, UnidentifiedImageError):
+            failed_train += 1
+            continue
         combined = create_combined_image(source_img, target_img, ref_grid_1, ref_grid_2)
         filename = filename_for_codepoint(cp, local_index)
         combined.save(train_out / filename, "JPEG", quality=95)
@@ -494,9 +515,13 @@ def prepare_image_target(
         if source_img is None:
             failed_test += 1
             continue
-        target_img = load_target_image(glyph_map[cp], invert_images=invert_images, resolution=resolution)
-        ref_grid_1 = build_ref_grid_from_paths(glyph_map, refs[:4], invert_images=invert_images)
-        ref_grid_2 = build_ref_grid_from_paths(glyph_map, refs[4:], invert_images=invert_images)
+        try:
+            target_img = load_target_image(glyph_map[cp], invert_images=invert_images, resolution=resolution)
+            ref_grid_1 = build_ref_grid_from_paths(glyph_map, refs[:4], invert_images=invert_images)
+            ref_grid_2 = build_ref_grid_from_paths(glyph_map, refs[4:], invert_images=invert_images)
+        except (OSError, ValueError, UnidentifiedImageError):
+            failed_test += 1
+            continue
         combined = create_combined_image(source_img, target_img, ref_grid_1, ref_grid_2)
         filename = filename_for_codepoint(cp, local_index)
         combined.save(test_out / filename, "JPEG", quality=95)
