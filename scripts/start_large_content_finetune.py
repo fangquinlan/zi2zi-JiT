@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import json
 import shlex
+import shutil
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 
 MODEL_FOLDER_URL = "https://drive.google.com/drive/folders/1QJi2ihxDBK2NF-jCE07g59YwuUTAd-iY"
@@ -43,6 +45,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--resume", default="")
     parser.add_argument("--max-chars-per-font", type=int, default=None)
+    parser.add_argument("--checkpoint-url", default="")
+    parser.add_argument("--download-tool", choices=["auto", "aria2c", "gdown"], default="auto")
+    parser.add_argument("--download-connections", type=int, default=16)
     parser.add_argument("--auto-download-checkpoint", action="store_true")
     parser.add_argument("--no-auto-download-checkpoint", action="store_false", dest="auto_download_checkpoint")
     parser.set_defaults(auto_download_checkpoint=True)
@@ -71,16 +76,70 @@ def import_or_install_gdown():
         return gdown
 
 
-def maybe_download_checkpoint(base_checkpoint: Path, dry_run: bool) -> None:
+def download_with_aria2c(url: str, output_path: Path, connections: int) -> None:
+    aria2c = shutil.which("aria2c")
+    if aria2c is None:
+        raise FileNotFoundError("`aria2c` is not installed or not on PATH.")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        aria2c,
+        "--continue=true",
+        f"--max-connection-per-server={connections}",
+        f"--split={connections}",
+        "--min-split-size=1M",
+        "--file-allocation=none",
+        "--summary-interval=5",
+        "--dir", str(output_path.parent),
+        "--out", output_path.name,
+        url,
+    ]
+    subprocess.run(cmd, check=True)
+
+
+def download_with_python(url: str, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with urllib.request.urlopen(url) as response, open(output_path, "wb") as f:
+        shutil.copyfileobj(response, f)
+
+
+def maybe_download_checkpoint(
+    base_checkpoint: Path,
+    *,
+    dry_run: bool,
+    checkpoint_url: str,
+    download_tool: str,
+    download_connections: int,
+) -> None:
     if base_checkpoint.is_file():
         return
     if dry_run:
         return
 
     base_checkpoint.parent.mkdir(parents=True, exist_ok=True)
-    gdown = import_or_install_gdown()
 
-    print(f"Checkpoint not found locally. Downloading from: {MODEL_FOLDER_URL}")
+    if checkpoint_url:
+        if download_tool in {"auto", "aria2c"} and shutil.which("aria2c") is not None:
+            print(
+                f"Checkpoint not found locally. Downloading with aria2c "
+                f"({download_connections} connections) from: {checkpoint_url}"
+            )
+            download_with_aria2c(checkpoint_url, base_checkpoint, download_connections)
+        elif download_tool == "aria2c":
+            raise FileNotFoundError("Requested --download-tool aria2c, but `aria2c` is not installed.")
+        else:
+            print(f"Checkpoint not found locally. Downloading with Python from: {checkpoint_url}")
+            download_with_python(checkpoint_url, base_checkpoint)
+
+        if not base_checkpoint.is_file():
+            raise FileNotFoundError(f"Download finished, but checkpoint is still missing: {base_checkpoint}")
+        return
+
+    gdown = import_or_install_gdown()
+    print(
+        "Checkpoint not found locally. Falling back to gdown folder download from "
+        f"{MODEL_FOLDER_URL}. This path is not multi-thread accelerated."
+    )
     downloaded = gdown.download_folder(
         url=MODEL_FOLDER_URL,
         output=str(base_checkpoint.parent),
@@ -116,7 +175,13 @@ def main() -> None:
     if not train_script.is_file():
         raise FileNotFoundError(f"Training entrypoint not found: {train_script}")
     if not base_checkpoint.is_file() and args.auto_download_checkpoint:
-        maybe_download_checkpoint(base_checkpoint, dry_run=args.dry_run)
+        maybe_download_checkpoint(
+            base_checkpoint,
+            dry_run=args.dry_run,
+            checkpoint_url=args.checkpoint_url,
+            download_tool=args.download_tool,
+            download_connections=args.download_connections,
+        )
     if not base_checkpoint.is_file() and not args.dry_run:
         raise FileNotFoundError(f"Base checkpoint not found: {base_checkpoint}")
 
@@ -173,7 +238,11 @@ def main() -> None:
     print(f"  checkpoint  = {base_checkpoint}")
     if not base_checkpoint.is_file():
         print("  checkpoint_status = missing on this machine (dry-run only)")
-        if args.auto_download_checkpoint:
+        if args.auto_download_checkpoint and args.checkpoint_url:
+            print(f"  checkpoint_source = {args.checkpoint_url}")
+            print(f"  download_tool = {args.download_tool}")
+            print(f"  download_connections = {args.download_connections}")
+        elif args.auto_download_checkpoint:
             print(f"  checkpoint_source = {MODEL_FOLDER_URL}")
     print("\nTraining command:")
     print(command_text)
