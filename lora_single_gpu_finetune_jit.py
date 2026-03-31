@@ -109,6 +109,11 @@ def main(args):
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     cudnn.benchmark = True
+    torch.set_float32_matmul_precision("high")
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        print("TF32 enabled for float32 matmul and cuDNN.")
 
     if args.output_dir is not None:
         os.makedirs(args.output_dir, exist_ok=True)

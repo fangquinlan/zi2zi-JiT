@@ -38,6 +38,11 @@ def main(args):
     np.random.seed(seed)
 
     cudnn.benchmark = True
+    torch.set_float32_matmul_precision("high")
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        print("TF32 enabled for float32 matmul and cuDNN.")
 
     num_tasks = misc.get_world_size()
     global_rank = misc.get_rank()

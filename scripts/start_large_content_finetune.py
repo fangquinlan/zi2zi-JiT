@@ -12,6 +12,14 @@ import sys
 import urllib.request
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _launcher_utils import maybe_reexec_with_repo_python
+
+maybe_reexec_with_repo_python(__file__, REPO_ROOT)
+
 MODEL_FOLDER_URL = "https://drive.google.com/drive/folders/1QJi2ihxDBK2NF-jCE07g59YwuUTAd-iY"
 
 
@@ -158,7 +166,7 @@ def maybe_download_checkpoint(
 
 def main() -> None:
     args = parse_args()
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = REPO_ROOT
     dataset_dir = (repo_root / args.dataset_dir).resolve()
     output_dir = (repo_root / args.output_dir).resolve()
     base_checkpoint = (repo_root / args.base_checkpoint).resolve()
