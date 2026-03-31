@@ -116,6 +116,80 @@ def _is_lora_state_dict(state_dict):
     return any('.base.weight' in k for k in state_dict)
 
 
+def _adapt_font_embedding_weight(
+        state_dict: dict[str, torch.Tensor],
+        model_state_dict: dict[str, torch.Tensor],
+):
+    key = "net.y_embedder.font_embedding.weight"
+    if key not in state_dict or key not in model_state_dict:
+        return state_dict, []
+
+    source = state_dict[key]
+    target = model_state_dict[key]
+    if source.shape == target.shape:
+        return state_dict, []
+
+    if source.ndim != 2 or target.ndim != 2 or source.shape[1] != target.shape[1]:
+        raise RuntimeError(
+            "Unsupported font embedding shape mismatch: "
+            f"checkpoint={tuple(source.shape)} model={tuple(target.shape)}"
+        )
+
+    adapted = dict(state_dict)
+    resized = target.clone()
+    copy_rows = min(max(source.shape[0] - 1, 0), max(target.shape[0] - 1, 0))
+    if copy_rows > 0:
+        resized[:copy_rows] = source[:copy_rows]
+    resized[-1] = source[-1]
+    adapted[key] = resized
+
+    messages = [
+        "Adapted font embedding from "
+        f"{tuple(source.shape)} to {tuple(target.shape)} by copying {copy_rows} font rows "
+        "and preserving the checkpoint's unconditional row."
+    ]
+    if target.shape[0] - 1 > copy_rows:
+        messages.append(
+            f"Initialized {target.shape[0] - 1 - copy_rows} extra font rows from the current model init."
+        )
+    return adapted, messages
+
+
+def load_state_dict_with_font_embedding_resize(
+        model: nn.Module,
+        state_dict: dict[str, torch.Tensor],
+        *,
+        strict: bool = True,
+):
+    model_state_dict = model.state_dict()
+    adapted_state_dict, messages = _adapt_font_embedding_weight(state_dict, model_state_dict)
+
+    shape_mismatches = []
+    for key, value in adapted_state_dict.items():
+        if key in model_state_dict and model_state_dict[key].shape != value.shape:
+            shape_mismatches.append(
+                f"{key}: checkpoint={tuple(value.shape)} model={tuple(model_state_dict[key].shape)}"
+            )
+    if shape_mismatches:
+        raise RuntimeError(
+            "Checkpoint still has incompatible parameter shapes after font embedding adaptation:\n"
+            + "\n".join(shape_mismatches)
+        )
+
+    load_result = model.load_state_dict(adapted_state_dict, strict=strict)
+    missing_keys = list(getattr(load_result, "missing_keys", []))
+    unexpected_keys = list(getattr(load_result, "unexpected_keys", []))
+    if strict and (missing_keys or unexpected_keys):
+        details = []
+        if missing_keys:
+            details.append(f"missing={missing_keys}")
+        if unexpected_keys:
+            details.append(f"unexpected={unexpected_keys}")
+        raise RuntimeError("Strict checkpoint load failed: " + "; ".join(details))
+
+    return messages
+
+
 def add_lora_args(parser: argparse.ArgumentParser):
     parser.add_argument("--base_checkpoint", default="", type=str,
                         help="Path to a full-precision checkpoint (file or folder) to initialize weights.")

@@ -18,6 +18,7 @@ from util.lora_utils import (
     resolve_checkpoint_path,
     _is_lora_state_dict,
     add_lora_args,
+    load_state_dict_with_font_embedding_resize,
 )
 from main_jit import FontSrcTargetRefsDataset, collate_src_target_refs, get_args_parser
 from util.crop import resize_and_random_crop
@@ -104,7 +105,9 @@ def main(args):
         del checkpoint
 
     if base_state_dict is not None and not base_is_lora:
-        model.load_state_dict(base_state_dict, strict=True)
+        load_messages = load_state_dict_with_font_embedding_resize(model, base_state_dict, strict=True)
+        for message in load_messages:
+            print(message)
         print("Loaded vanilla base checkpoint from", base_ckpt_path)
 
     targets = [t.strip() for t in args.lora_targets.split(",") if t.strip()]
@@ -112,7 +115,9 @@ def main(args):
     print(f"LoRA injected into {replaced} Linear modules (targets={targets}).")
 
     if base_state_dict is not None and base_is_lora:
-        model.load_state_dict(base_state_dict, strict=True)
+        load_messages = load_state_dict_with_font_embedding_resize(model, base_state_dict, strict=True)
+        for message in load_messages:
+            print(message)
         print("Loaded LoRA base checkpoint from", base_ckpt_path)
 
     mark_only_lora_as_trainable(
@@ -148,7 +153,13 @@ def main(args):
     checkpoint_path = resolve_checkpoint_path(args.resume) if args.resume else None
     if checkpoint_path and os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-        model_without_ddp.load_state_dict(checkpoint["model"])
+        load_messages = load_state_dict_with_font_embedding_resize(
+            model_without_ddp,
+            checkpoint["model"],
+            strict=True,
+        )
+        for message in load_messages:
+            print(message)
 
         model_without_ddp.ema_params1 = list(model_without_ddp.parameters())
         model_without_ddp.ema_params2 = list(model_without_ddp.parameters())
