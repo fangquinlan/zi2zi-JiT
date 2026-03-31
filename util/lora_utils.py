@@ -80,7 +80,11 @@ def inject_lora(
     return len(to_replace)
 
 
-def mark_only_lora_as_trainable(model: nn.Module, train_font_emb: bool = False):
+def mark_only_lora_as_trainable(
+        model: nn.Module,
+        train_font_emb: bool = False,
+        train_content_encoder: bool = False,
+):
     for p in model.parameters():
         p.requires_grad = False
     for module in model.modules():
@@ -91,6 +95,9 @@ def mark_only_lora_as_trainable(model: nn.Module, train_font_emb: bool = False):
                 module.lora_B.requires_grad = True
     if train_font_emb:
         model.net.y_embedder.font_embedding.weight.requires_grad = True
+    if train_content_encoder:
+        for param in model.net.y_embedder.content_encoder.parameters():
+            param.requires_grad = True
 
 
 def count_trainable_params(model: nn.Module):
@@ -117,4 +124,9 @@ def add_lora_args(parser: argparse.ArgumentParser):
     parser.add_argument("--lora_dropout", default=0.0, type=float, help="LoRA dropout.")
     parser.add_argument("--lora_targets", default="qkv,proj,w12,w3", type=str,
                         help="Comma-separated list of Linear suffixes to LoRA-wrap.")
+    parser.add_argument(
+        "--train_content_encoder",
+        action="store_true",
+        help="Also finetune the content encoder alongside LoRA weights. This increases VRAM usage.",
+    )
     return parser

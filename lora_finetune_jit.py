@@ -115,10 +115,15 @@ def main(args):
         model.load_state_dict(base_state_dict, strict=True)
         print("Loaded LoRA base checkpoint from", base_ckpt_path)
 
-    mark_only_lora_as_trainable(model, train_font_emb=True)
+    mark_only_lora_as_trainable(
+        model,
+        train_font_emb=True,
+        train_content_encoder=args.train_content_encoder,
+    )
 
     n_trainable = count_trainable_params(model)
-    print("Trainable parameters (LoRA only): {:.6f}M".format(n_trainable / 1e6))
+    trainable_desc = "LoRA + content encoder" if args.train_content_encoder else "LoRA only"
+    print("Trainable parameters ({}): {:.6f}M".format(trainable_desc, n_trainable / 1e6))
 
     model.to(device)
 
@@ -162,7 +167,7 @@ def main(args):
         if args.resume:
             print("Warning: resume path not found, training from scratch.")
         else:
-            print("Training from base checkpoint (LoRA only).")
+            print("Training from base checkpoint ({}).".format(trainable_desc))
 
     if args.evaluate_gen:
         print("Evaluating checkpoint at {} epoch".format(args.start_epoch))

@@ -163,6 +163,8 @@ python lora_single_gpu_finetune_jit.py \
 | `--batch_size` | 设为 16 约使用 ~4 GB 显存。 |
 | `--cfg` | 条件引导强度。JiT-B/16 建议使用 **2.6**，JiT-L/16 建议使用 **2.4**。 |
 
+如果显存更充足、并且希望在微调时让 content encoder 一起适配，可以额外加上 `--train_content_encoder`。这样训练模式会从纯 LoRA 更新切换为 `LoRA + content encoder`，显存占用也会相应增加。
+
 ### 生成
 
 从微调后的 checkpoint 生成字符：

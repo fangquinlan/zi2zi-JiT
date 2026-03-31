@@ -167,6 +167,8 @@ python lora_single_gpu_finetune_jit.py \
 | `--batch_size` | 16 uses ~4 GB VRAM. |
 | `--cfg` | Conditioning strength. Use **2.6** for JiT-B/16, **2.4** for JiT-L/16. |
 
+If you have more VRAM and want to let the content encoder adapt during fine-tuning, add `--train_content_encoder`. This changes the trainable set from pure LoRA weights to `LoRA + content encoder`, so VRAM usage will increase accordingly.
+
 ### Generation
 
 Generate characters from a fine-tuned checkpoint:

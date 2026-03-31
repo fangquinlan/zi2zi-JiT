@@ -18,6 +18,7 @@ from util.lora_utils import (
     count_trainable_params,
     resolve_checkpoint_path,
     _is_lora_state_dict,
+    add_lora_args,
 )
 from main_jit import FontSrcTargetRefsDataset, collate_src_target_refs
 from util.crop import resize_and_random_crop
@@ -91,14 +92,7 @@ def get_args_parser():
     parser.add_argument('--log_freq', default=100, type=int)
     parser.add_argument('--device', default='cuda')
 
-    # LoRA
-    parser.add_argument('--base_checkpoint', default='', type=str)
-    parser.add_argument('--lora_r', default=8, type=int)
-    parser.add_argument('--lora_alpha', default=16, type=int)
-    parser.add_argument('--lora_dropout', default=0.0, type=float)
-    parser.add_argument('--lora_targets', default='qkv,proj,w12,w3', type=str)
-
-    return parser
+    return add_lora_args(parser)
 
 
 # ---------------------------------------------------------------------------
@@ -184,10 +178,15 @@ def main(args):
         model.load_state_dict(base_state_dict, strict=True)
         print("Loaded LoRA base checkpoint from", base_ckpt_path)
 
-    mark_only_lora_as_trainable(model, train_font_emb=True)
+    mark_only_lora_as_trainable(
+        model,
+        train_font_emb=True,
+        train_content_encoder=args.train_content_encoder,
+    )
 
     n_trainable = count_trainable_params(model)
-    print("Trainable parameters (LoRA only): {:.6f}M".format(n_trainable / 1e6))
+    trainable_desc = "LoRA + content encoder" if args.train_content_encoder else "LoRA only"
+    print("Trainable parameters ({}): {:.6f}M".format(trainable_desc, n_trainable / 1e6))
 
     model.to(device)
 
@@ -212,7 +211,7 @@ def main(args):
     elif args.resume:
         print("Warning: resume path not found, training from scratch.")
     else:
-        print("Training from base checkpoint (LoRA only).")
+        print("Training from base checkpoint ({}).".format(trainable_desc))
 
     if args.evaluate_gen:
         print("Evaluating checkpoint at {} epoch".format(args.start_epoch))
