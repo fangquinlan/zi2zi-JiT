@@ -22,7 +22,7 @@ from util.lora_utils import (
 )
 from main_jit import FontSrcTargetRefsDataset, collate_src_target_refs, get_args_parser
 from util.crop import resize_and_random_crop
-from util.misc import save_model_no_ema
+from util.misc import save_model_no_ema, save_named_model_no_ema
 import util.misc as misc
 
 
@@ -162,6 +162,7 @@ def main(args):
     print(optimizer)
 
     checkpoint_path = resolve_checkpoint_path(args.resume) if args.resume else None
+    best_fid = float("inf")
     if checkpoint_path and os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
         load_messages = load_state_dict_with_font_embedding_resize(
@@ -177,6 +178,8 @@ def main(args):
 
         if "epoch" in checkpoint:
             args.start_epoch = checkpoint["epoch"] + 1
+        if "best_fid" in checkpoint:
+            best_fid = float(checkpoint["best_fid"])
         if "optimizer" in checkpoint:
             optimizer.load_state_dict(checkpoint["optimizer"])
             print("Loaded optimizer state from", checkpoint_path)
@@ -199,16 +202,27 @@ def main(args):
                 evaluate(model_without_ddp, args, 0, batch_size=args.gen_bsz, log_writer=log_writer)
         return
 
-    print(f"Start LoRA training for {args.epochs} epochs")
+    max_epochs = None if args.infinite or args.epochs <= 0 else args.epochs
+    train_target_desc = "infinite training" if max_epochs is None else f"{max_epochs} epochs"
+    print(f"Start LoRA training for {train_target_desc}")
     start_time = time.time()
-    for epoch in range(args.start_epoch, args.epochs):
+    epoch = args.start_epoch
+    while True:
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
 
         train_one_epoch(model, model_without_ddp, data_loader_train, optimizer, device, epoch, log_writer=log_writer,
                         args=args)
 
-        if epoch > 0 and (epoch % args.save_last_freq == 0 or epoch + 1 == args.epochs):
+        save_named_model_no_ema(
+            args=args,
+            model_without_ddp=model_without_ddp,
+            epoch=epoch,
+            checkpoint_name="latest",
+            extra_state={"best_fid": best_fid},
+        )
+
+        if epoch > 0 and (epoch % args.save_last_freq == 0 or (max_epochs is not None and epoch + 1 == max_epochs)):
             save_model_no_ema(
                 args=args,
                 model_without_ddp=model_without_ddp,
@@ -216,14 +230,28 @@ def main(args):
                 epoch_name="last"
             )
 
-        if args.online_eval and epoch > 0 and (epoch % args.eval_freq == 0 or epoch + 1 == args.epochs):
+        if args.online_eval and epoch > 0 and (epoch % args.eval_freq == 0 or (max_epochs is not None and epoch + 1 == max_epochs)):
             torch.cuda.empty_cache()
             with torch.no_grad():
-                evaluate(model_without_ddp, args, epoch, batch_size=args.gen_bsz, log_writer=log_writer)
+                metrics = evaluate(model_without_ddp, args, epoch, batch_size=args.gen_bsz, log_writer=log_writer)
+            if metrics["fid"] < best_fid:
+                best_fid = float(metrics["fid"])
+                save_named_model_no_ema(
+                    args=args,
+                    model_without_ddp=model_without_ddp,
+                    epoch=epoch,
+                    checkpoint_name="best",
+                    extra_state={"best_fid": best_fid, "best_epoch": epoch},
+                )
+                print(f"Saved new best checkpoint at epoch {epoch} with FID {best_fid:.4f}")
             torch.cuda.empty_cache()
 
         if misc.is_main_process() and log_writer is not None:
             log_writer.flush()
+
+        if max_epochs is not None and epoch + 1 >= max_epochs:
+            break
+        epoch += 1
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
@@ -233,6 +261,8 @@ def main(args):
 if __name__ == "__main__":
     parser = get_args_parser()
     parser = add_lora_args(parser)
+    parser.add_argument('--infinite', action='store_true',
+                        help='Train indefinitely until manually stopped.')
     args = parser.parse_args()
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     main(args)

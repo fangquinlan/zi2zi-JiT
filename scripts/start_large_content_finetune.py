@@ -31,6 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="run/lora_ft_large_content_encoder")
     parser.add_argument("--base-checkpoint", default="models/zi2zi-JiT-L-16.pth")
     parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--infinite", action="store_true")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--blr", type=float, default=2e-4)
     parser.add_argument("--warmup-epochs", type=int, default=2)
@@ -236,6 +237,8 @@ def main() -> None:
 
     if args.max_chars_per_font is not None:
         cmd.extend(["--max_chars_per_font", str(args.max_chars_per_font)])
+    if args.infinite:
+        cmd.append("--infinite")
     if args.train_style_encoder:
         cmd.append("--train_style_encoder")
     if args.resume:

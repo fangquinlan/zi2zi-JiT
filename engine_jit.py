@@ -203,7 +203,7 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None):
     print("Switch back from ema")
     model_without_ddp.load_state_dict(model_state_dict)
 
-    if log_writer is not None:
+    if misc.is_main_process():
         fid_statistics_file = _resolve_fid_statistics_file(args.img_size)
         metrics_dict = torch_fidelity.calculate_metrics(
             input1=gen_folder,
@@ -216,14 +216,30 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None):
             prc=False,
             verbose=False,
         )
-        fid = metrics_dict['frechet_inception_distance']
-        inception_score = metrics_dict['inception_score_mean']
-        postfix = "_cfg{}_res{}".format(model_without_ddp.cfg_scale, args.img_size)
-        log_writer.add_scalar('fid{}'.format(postfix), fid, epoch)
-        log_writer.add_scalar('is{}'.format(postfix), inception_score, epoch)
+        fid = float(metrics_dict['frechet_inception_distance'])
+        inception_score = float(metrics_dict['inception_score_mean'])
+        if log_writer is not None:
+            postfix = "_cfg{}_res{}".format(model_without_ddp.cfg_scale, args.img_size)
+            log_writer.add_scalar('fid{}'.format(postfix), fid, epoch)
+            log_writer.add_scalar('is{}'.format(postfix), inception_score, epoch)
         print("FID: {:.4f}, Inception Score: {:.4f}".format(fid, inception_score))
+    else:
+        fid = float("inf")
+        inception_score = 0.0
+
+    metrics_tensor = torch.tensor([fid, inception_score], device='cuda')
+    torch.distributed.broadcast(metrics_tensor, src=0)
+    fid = float(metrics_tensor[0].item())
+    inception_score = float(metrics_tensor[1].item())
 
     torch.distributed.barrier()
+    return {
+        "fid": fid,
+        "inception_score": inception_score,
+        "base_folder": base_folder,
+        "generated_folder": gen_folder,
+        "compare_folder": save_folder,
+    }
 
 
 def train_one_epoch_single_gpu(model, data_loader, optimizer, device, epoch, log_writer=None, args=None):
@@ -374,22 +390,29 @@ def evaluate_single_gpu(model, args, epoch, batch_size=64, log_writer=None):
             grid_img = np.concatenate(rows, axis=0)
             cv2.imwrite(os.path.join(save_folder, 'grid_{}.png'.format(str(grid_id).zfill(5))), grid_img)
 
+    fid_statistics_file = _resolve_fid_statistics_file(args.img_size)
+    metrics_dict = torch_fidelity.calculate_metrics(
+        input1=gen_folder,
+        input2=None,
+        fid_statistics_file=fid_statistics_file,
+        cuda=True,
+        isc=True,
+        fid=True,
+        kid=False,
+        prc=False,
+        verbose=False,
+    )
+    fid = metrics_dict['frechet_inception_distance']
+    inception_score = metrics_dict['inception_score_mean']
     if log_writer is not None:
-        fid_statistics_file = _resolve_fid_statistics_file(args.img_size)
-        metrics_dict = torch_fidelity.calculate_metrics(
-            input1=gen_folder,
-            input2=None,
-            fid_statistics_file=fid_statistics_file,
-            cuda=True,
-            isc=True,
-            fid=True,
-            kid=False,
-            prc=False,
-            verbose=False,
-        )
-        fid = metrics_dict['frechet_inception_distance']
-        inception_score = metrics_dict['inception_score_mean']
         postfix = "_cfg{}_res{}".format(model.cfg_scale, args.img_size)
         log_writer.add_scalar('fid{}'.format(postfix), fid, epoch)
         log_writer.add_scalar('is{}'.format(postfix), inception_score, epoch)
-        print("FID: {:.4f}, Inception Score: {:.4f}".format(fid, inception_score))
+    print("FID: {:.4f}, Inception Score: {:.4f}".format(fid, inception_score))
+    return {
+        "fid": float(fid),
+        "inception_score": float(inception_score),
+        "base_folder": base_folder,
+        "generated_folder": gen_folder,
+        "compare_folder": save_folder,
+    }

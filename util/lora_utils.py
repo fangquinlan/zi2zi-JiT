@@ -112,6 +112,9 @@ def resolve_checkpoint_path(path: str):
     if path is None:
         return None
     if os.path.isdir(path):
+        latest_path = os.path.join(path, "checkpoint-latest.pth")
+        if os.path.exists(latest_path):
+            return latest_path
         return os.path.join(path, "checkpoint-last.pth")
     return path
 

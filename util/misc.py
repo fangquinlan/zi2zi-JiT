@@ -290,13 +290,19 @@ def all_reduce_mean(x):
 
 
 def save_model_no_ema(args, model_without_ddp, epoch, epoch_name=None):
-    if epoch_name is None:
-        epoch_name = str(epoch)
+    save_named_model_no_ema(args, model_without_ddp, epoch, checkpoint_name=epoch_name)
+
+
+def save_named_model_no_ema(args, model_without_ddp, epoch, checkpoint_name=None, extra_state=None):
+    if checkpoint_name is None:
+        checkpoint_name = str(epoch)
     output_dir = Path(args.output_dir)
-    checkpoint_path = output_dir / ('checkpoint-%s.pth' % epoch_name)
+    checkpoint_path = output_dir / ('checkpoint-%s.pth' % checkpoint_name)
     to_save = {
         'model': model_without_ddp.state_dict(),
         'epoch': epoch,
         'args': args,
     }
+    if extra_state:
+        to_save.update(extra_state)
     save_on_master(to_save, checkpoint_path)
