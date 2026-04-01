@@ -84,6 +84,7 @@ def mark_only_lora_as_trainable(
         model: nn.Module,
         train_font_emb: bool = False,
         train_content_encoder: bool = False,
+        train_style_encoder: bool = False,
 ):
     for p in model.parameters():
         p.requires_grad = False
@@ -97,6 +98,9 @@ def mark_only_lora_as_trainable(
         model.net.y_embedder.font_embedding.weight.requires_grad = True
     if train_content_encoder:
         for param in model.net.y_embedder.content_encoder.parameters():
+            param.requires_grad = True
+    if train_style_encoder:
+        for param in model.net.y_embedder.style_encoder.parameters():
             param.requires_grad = True
 
 
@@ -202,5 +206,10 @@ def add_lora_args(parser: argparse.ArgumentParser):
         "--train_content_encoder",
         action="store_true",
         help="Also finetune the content encoder alongside LoRA weights. This increases VRAM usage.",
+    )
+    parser.add_argument(
+        "--train_style_encoder",
+        action="store_true",
+        help="Also finetune the style encoder alongside LoRA weights. This increases VRAM usage.",
     )
     return parser

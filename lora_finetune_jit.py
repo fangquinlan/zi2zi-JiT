@@ -129,10 +129,16 @@ def main(args):
         model,
         train_font_emb=True,
         train_content_encoder=args.train_content_encoder,
+        train_style_encoder=args.train_style_encoder,
     )
 
     n_trainable = count_trainable_params(model)
-    trainable_desc = "LoRA + content encoder" if args.train_content_encoder else "LoRA only"
+    trainable_parts = ["LoRA"]
+    if args.train_content_encoder:
+        trainable_parts.append("content encoder")
+    if args.train_style_encoder:
+        trainable_parts.append("style encoder")
+    trainable_desc = " + ".join(trainable_parts)
     print("Trainable parameters ({}): {:.6f}M".format(trainable_desc, n_trainable / 1e6))
 
     model.to(device)

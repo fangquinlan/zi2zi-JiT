@@ -38,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lora-alpha", type=int, default=32)
     parser.add_argument("--lora-dropout", type=float, default=0.0)
     parser.add_argument("--lora-targets", default="qkv,proj,w12,w3")
+    parser.add_argument("--train-style-encoder", action="store_true")
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--save-last-freq", type=int, default=10)
     parser.add_argument("--eval-freq", type=int, default=10)
@@ -235,6 +236,8 @@ def main() -> None:
 
     if args.max_chars_per_font is not None:
         cmd.extend(["--max_chars_per_font", str(args.max_chars_per_font)])
+    if args.train_style_encoder:
+        cmd.append("--train_style_encoder")
     if args.resume:
         cmd.extend(["--resume", args.resume])
 
