@@ -253,15 +253,17 @@ def main(args):
         train_one_epoch_single_gpu(model, data_loader_train, optimizer, device, epoch,
                                    log_writer=log_writer, args=args)
 
-        save_named_model_no_ema(
-            args=args,
-            model_without_ddp=model,
-            epoch=epoch,
-            checkpoint_name="latest",
-            extra_state={"best_fid": best_fid},
+        should_update_latest = epoch > 0 and (
+            epoch % args.save_last_freq == 0 or (max_epochs is not None and epoch + 1 == max_epochs)
         )
-
-        if epoch > 0 and (epoch % args.save_last_freq == 0 or (max_epochs is not None and epoch + 1 == max_epochs)):
+        if should_update_latest:
+            save_named_model_no_ema(
+                args=args,
+                model_without_ddp=model,
+                epoch=epoch,
+                checkpoint_name="latest",
+                extra_state={"best_fid": best_fid},
+            )
             save_model_no_ema(
                 args=args,
                 model_without_ddp=model,
