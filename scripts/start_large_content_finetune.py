@@ -31,6 +31,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="run/lora_ft_large_content_encoder")
     parser.add_argument("--base-checkpoint", default="models/zi2zi-JiT-L-16.pth")
     parser.add_argument("--upgrade-anti-hallucination", action="store_true")
+    parser.add_argument(
+        "--upgrade-profile",
+        choices=["stable", "semantic", "ids", "calligraphy"],
+        default="",
+        help="Preset tuned for different structural-constraint strategies.",
+    )
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--infinite", action="store_true")
     parser.add_argument("--batch-size", type=int, default=8)
@@ -207,19 +213,72 @@ def main() -> None:
     if not base_checkpoint.is_file() and not args.dry_run:
         raise FileNotFoundError(f"Base checkpoint not found: {base_checkpoint}")
 
-    upgrade_enabled = args.upgrade_anti_hallucination
-    use_unicode_char_labels = args.use_unicode_char_labels or upgrade_enabled or args.use_ids_conditioning
-    use_char_embedding = args.use_char_embedding or upgrade_enabled
-    use_ids_conditioning = args.use_ids_conditioning
+    profile = args.upgrade_profile.strip().lower()
+    upgrade_enabled = args.upgrade_anti_hallucination or bool(profile)
+    profile_defaults = {
+        "stable": {
+            "use_unicode_char_labels": True,
+            "use_char_embedding": True,
+            "use_ids_conditioning": False,
+            "num_style_refs": 4,
+            "style_ref_mode": "mean",
+            "binary_loss_weight": 0.08,
+            "edge_loss_weight": 0.05,
+            "projection_loss_weight": 0.03,
+            "char_loss_weight": 0.08,
+            "ids_loss_weight": 0.0,
+        },
+        "semantic": {
+            "use_unicode_char_labels": True,
+            "use_char_embedding": True,
+            "use_ids_conditioning": False,
+            "num_style_refs": 8,
+            "style_ref_mode": "mean",
+            "binary_loss_weight": 0.12,
+            "edge_loss_weight": 0.08,
+            "projection_loss_weight": 0.04,
+            "char_loss_weight": 0.15,
+            "ids_loss_weight": 0.0,
+        },
+        "ids": {
+            "use_unicode_char_labels": True,
+            "use_char_embedding": True,
+            "use_ids_conditioning": True,
+            "num_style_refs": 8,
+            "style_ref_mode": "mean",
+            "binary_loss_weight": 0.12,
+            "edge_loss_weight": 0.08,
+            "projection_loss_weight": 0.04,
+            "char_loss_weight": 0.12,
+            "ids_loss_weight": 0.06,
+        },
+        "calligraphy": {
+            "use_unicode_char_labels": True,
+            "use_char_embedding": True,
+            "use_ids_conditioning": True,
+            "num_style_refs": 8,
+            "style_ref_mode": "mean",
+            "binary_loss_weight": 0.10,
+            "edge_loss_weight": 0.08,
+            "projection_loss_weight": 0.04,
+            "char_loss_weight": 0.06,
+            "ids_loss_weight": 0.02,
+        },
+    }
+    defaults = profile_defaults.get(profile, {})
+
+    use_unicode_char_labels = args.use_unicode_char_labels or defaults.get("use_unicode_char_labels", False) or args.use_ids_conditioning or upgrade_enabled
+    use_char_embedding = args.use_char_embedding or defaults.get("use_char_embedding", False) or upgrade_enabled
+    use_ids_conditioning = args.use_ids_conditioning or defaults.get("use_ids_conditioning", False)
     if use_ids_conditioning and not args.ids_path:
         raise ValueError("--use-ids-conditioning requires --ids-path.")
-    num_style_refs = args.num_style_refs if args.num_style_refs is not None else (8 if upgrade_enabled else 1)
-    style_ref_mode = args.style_ref_mode or ("mean" if upgrade_enabled else "single")
-    binary_loss_weight = args.binary_loss_weight if args.binary_loss_weight is not None else (0.15 if upgrade_enabled else 0.0)
-    edge_loss_weight = args.edge_loss_weight if args.edge_loss_weight is not None else (0.10 if upgrade_enabled else 0.0)
-    projection_loss_weight = args.projection_loss_weight if args.projection_loss_weight is not None else (0.05 if upgrade_enabled else 0.0)
-    char_loss_weight = args.char_loss_weight if args.char_loss_weight is not None else (0.20 if upgrade_enabled else 0.0)
-    ids_loss_weight = args.ids_loss_weight if args.ids_loss_weight is not None else (0.10 if (upgrade_enabled and use_ids_conditioning) else 0.0)
+    num_style_refs = args.num_style_refs if args.num_style_refs is not None else defaults.get("num_style_refs", 8 if upgrade_enabled else 1)
+    style_ref_mode = args.style_ref_mode or defaults.get("style_ref_mode", "mean" if upgrade_enabled else "single")
+    binary_loss_weight = args.binary_loss_weight if args.binary_loss_weight is not None else defaults.get("binary_loss_weight", 0.15 if upgrade_enabled else 0.0)
+    edge_loss_weight = args.edge_loss_weight if args.edge_loss_weight is not None else defaults.get("edge_loss_weight", 0.10 if upgrade_enabled else 0.0)
+    projection_loss_weight = args.projection_loss_weight if args.projection_loss_weight is not None else defaults.get("projection_loss_weight", 0.05 if upgrade_enabled else 0.0)
+    char_loss_weight = args.char_loss_weight if args.char_loss_weight is not None else defaults.get("char_loss_weight", 0.20 if upgrade_enabled else 0.0)
+    ids_loss_weight = args.ids_loss_weight if args.ids_loss_weight is not None else defaults.get("ids_loss_weight", 0.10 if (upgrade_enabled and use_ids_conditioning) else 0.0)
 
     num_fonts = int(dataset_info["num_fonts"])
     if use_unicode_char_labels:
@@ -300,6 +359,7 @@ def main() -> None:
     print(f"  unicode_labels = {use_unicode_char_labels}")
     print(f"  char_embedding = {use_char_embedding}")
     print(f"  ids_conditioning = {use_ids_conditioning}")
+    print(f"  upgrade_profile = {profile or 'custom/default'}")
     print(f"  num_style_refs = {num_style_refs}")
     print(f"  style_ref_mode = {style_ref_mode}")
     print(f"  binary_loss_weight = {binary_loss_weight}")

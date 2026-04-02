@@ -102,6 +102,11 @@ def mark_only_lora_as_trainable(
     if train_style_encoder:
         for param in model.net.y_embedder.style_encoder.parameters():
             param.requires_grad = True
+    for head_name in ("char_consistency_head", "ids_consistency_head"):
+        head = getattr(model, head_name, None)
+        if head is not None:
+            for param in head.parameters():
+                param.requires_grad = True
 
 
 def count_trainable_params(model: nn.Module):
