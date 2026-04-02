@@ -279,6 +279,10 @@ def get_args_parser():
                         help='Weight for auxiliary edge-structure loss.')
     parser.add_argument('--projection_loss_weight', default=0.0, type=float,
                         help='Weight for row/column projection consistency loss.')
+    parser.add_argument('--char_loss_weight', default=0.0, type=float,
+                        help='Weight for auxiliary character-consistency classification loss.')
+    parser.add_argument('--ids_loss_weight', default=0.0, type=float,
+                        help='Weight for auxiliary IDS token presence loss.')
 
     # checkpointing
     parser.add_argument('--output_dir', default='./output_dir',

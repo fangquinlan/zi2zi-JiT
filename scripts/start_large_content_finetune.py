@@ -50,6 +50,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--binary-loss-weight", type=float, default=None)
     parser.add_argument("--edge-loss-weight", type=float, default=None)
     parser.add_argument("--projection-loss-weight", type=float, default=None)
+    parser.add_argument("--char-loss-weight", type=float, default=None)
+    parser.add_argument("--ids-loss-weight", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--save-last-freq", type=int, default=10)
     parser.add_argument("--eval-freq", type=int, default=10)
@@ -216,6 +218,8 @@ def main() -> None:
     binary_loss_weight = args.binary_loss_weight if args.binary_loss_weight is not None else (0.15 if upgrade_enabled else 0.0)
     edge_loss_weight = args.edge_loss_weight if args.edge_loss_weight is not None else (0.10 if upgrade_enabled else 0.0)
     projection_loss_weight = args.projection_loss_weight if args.projection_loss_weight is not None else (0.05 if upgrade_enabled else 0.0)
+    char_loss_weight = args.char_loss_weight if args.char_loss_weight is not None else (0.20 if upgrade_enabled else 0.0)
+    ids_loss_weight = args.ids_loss_weight if args.ids_loss_weight is not None else (0.10 if (upgrade_enabled and use_ids_conditioning) else 0.0)
 
     num_fonts = int(dataset_info["num_fonts"])
     if use_unicode_char_labels:
@@ -280,6 +284,10 @@ def main() -> None:
         cmd.extend(["--edge_loss_weight", str(edge_loss_weight)])
     if projection_loss_weight > 0:
         cmd.extend(["--projection_loss_weight", str(projection_loss_weight)])
+    if char_loss_weight > 0:
+        cmd.extend(["--char_loss_weight", str(char_loss_weight)])
+    if ids_loss_weight > 0:
+        cmd.extend(["--ids_loss_weight", str(ids_loss_weight)])
     if args.resume:
         cmd.extend(["--resume", args.resume])
 
@@ -297,6 +305,8 @@ def main() -> None:
     print(f"  binary_loss_weight = {binary_loss_weight}")
     print(f"  edge_loss_weight = {edge_loss_weight}")
     print(f"  projection_loss_weight = {projection_loss_weight}")
+    print(f"  char_loss_weight = {char_loss_weight}")
+    print(f"  ids_loss_weight = {ids_loss_weight}")
     if not base_checkpoint.is_file():
         print("  checkpoint_status = missing on this machine (dry-run only)")
         if args.auto_download_checkpoint and args.checkpoint_url:

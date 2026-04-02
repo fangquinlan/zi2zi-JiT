@@ -97,6 +97,8 @@ def get_args_parser():
     parser.add_argument('--binary_loss_weight', default=0.0, type=float)
     parser.add_argument('--edge_loss_weight', default=0.0, type=float)
     parser.add_argument('--projection_loss_weight', default=0.0, type=float)
+    parser.add_argument('--char_loss_weight', default=0.0, type=float)
+    parser.add_argument('--ids_loss_weight', default=0.0, type=float)
 
     # checkpointing
     parser.add_argument('--output_dir', default='./output_dir')

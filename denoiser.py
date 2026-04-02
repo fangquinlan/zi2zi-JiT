@@ -50,6 +50,11 @@ class Denoiser(nn.Module):
         self.binary_loss_weight = getattr(args, "binary_loss_weight", 0.0)
         self.edge_loss_weight = getattr(args, "edge_loss_weight", 0.0)
         self.projection_loss_weight = getattr(args, "projection_loss_weight", 0.0)
+        self.char_loss_weight = getattr(args, "char_loss_weight", 0.0)
+        self.ids_loss_weight = getattr(args, "ids_loss_weight", 0.0)
+        self.char_consistency_head = nn.Linear(self.net.hidden_size, args.num_chars) if self.char_loss_weight > 0 else None
+        ids_vocab_size = int(getattr(args, "ids_vocab_size", 0))
+        self.ids_consistency_head = nn.Linear(self.net.hidden_size, ids_vocab_size + 1) if self.ids_loss_weight > 0 and ids_vocab_size > 0 else None
         self.last_loss_breakdown = {}
 
     def drop_labels(self, labels):
@@ -93,6 +98,8 @@ class Denoiser(nn.Module):
         aux_binary = x_pred.new_zeros(())
         aux_edge = x_pred.new_zeros(())
         aux_projection = x_pred.new_zeros(())
+        aux_char = x_pred.new_zeros(())
+        aux_ids = x_pred.new_zeros(())
 
         if self.binary_loss_weight > 0 or self.edge_loss_weight > 0 or self.projection_loss_weight > 0:
             pred_ink = self._to_ink_map(x_pred)
@@ -104,17 +111,31 @@ class Denoiser(nn.Module):
             if self.projection_loss_weight > 0:
                 aux_projection = self._projection_consistency_loss(pred_ink, target_ink)
 
+        if self.char_consistency_head is not None or self.ids_consistency_head is not None:
+            semantic_feat = self.net.y_embedder.content_encoder(x_pred)
+            if self.char_consistency_head is not None:
+                char_logits = self.char_consistency_head(semantic_feat).float()
+                aux_char = F.cross_entropy(char_logits, char_labels)
+            if self.ids_consistency_head is not None:
+                ids_targets = self.net.y_embedder.lookup_ids_bow(char_labels)
+                ids_logits = self.ids_consistency_head(semantic_feat).float()
+                aux_ids = F.binary_cross_entropy_with_logits(ids_logits[:, 1:], ids_targets[:, 1:])
+
         total_loss = (
             diffusion_loss
             + self.binary_loss_weight * aux_binary
             + self.edge_loss_weight * aux_edge
             + self.projection_loss_weight * aux_projection
+            + self.char_loss_weight * aux_char
+            + self.ids_loss_weight * aux_ids
         )
         self.last_loss_breakdown = {
             "diffusion_loss": float(diffusion_loss.detach().item()),
             "binary_loss": float(aux_binary.detach().item()),
             "edge_loss": float(aux_edge.detach().item()),
             "projection_loss": float(aux_projection.detach().item()),
+            "char_loss": float(aux_char.detach().item()),
+            "ids_loss": float(aux_ids.detach().item()),
             "total_loss": float(total_loss.detach().item()),
         }
 

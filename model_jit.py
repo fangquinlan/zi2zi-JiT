@@ -174,6 +174,15 @@ class LabelEmbedder(nn.Module):
         denom = token_mask.sum(dim=1).clamp_min(1.0)
         return (token_emb * token_mask).sum(dim=1) / denom
 
+    def lookup_ids_bow(self, char_labels):
+        if self.ids_embedding is None:
+            raise RuntimeError("IDS conditioning is not enabled for this LabelEmbedder.")
+        token_ids = self.ids_token_ids[char_labels]
+        bow = F.one_hot(token_ids, num_classes=self.ids_embedding.num_embeddings).amax(dim=1).float()
+        if bow.shape[-1] > 0:
+            bow[..., 0] = 0.0
+        return bow
+
     def set_ids_lookup(self, token_ids, token_mask):
         if self.ids_embedding is None:
             raise RuntimeError("IDS conditioning is not enabled for this LabelEmbedder.")

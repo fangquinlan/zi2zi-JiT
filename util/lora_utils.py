@@ -173,6 +173,10 @@ def _initialize_missing_optional_embeddings(
         "net.y_embedder.ids_embedding.weight",
         "net.y_embedder.ids_token_ids",
         "net.y_embedder.ids_token_mask",
+        "char_consistency_head.weight",
+        "char_consistency_head.bias",
+        "ids_consistency_head.weight",
+        "ids_consistency_head.bias",
     ]
     for key in optional_keys:
         if key in model_state_dict and key not in adapted:
