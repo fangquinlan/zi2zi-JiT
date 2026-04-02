@@ -30,6 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-dir", default="data/mixed_finetune_dataset")
     parser.add_argument("--output-dir", default="run/lora_ft_large_content_encoder")
     parser.add_argument("--base-checkpoint", default="models/zi2zi-JiT-L-16.pth")
+    parser.add_argument("--upgrade-anti-hallucination", action="store_true")
     parser.add_argument("--epochs", type=int, default=200)
     parser.add_argument("--infinite", action="store_true")
     parser.add_argument("--batch-size", type=int, default=8)
@@ -40,6 +41,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lora-dropout", type=float, default=0.0)
     parser.add_argument("--lora-targets", default="qkv,proj,w12,w3")
     parser.add_argument("--train-style-encoder", action="store_true")
+    parser.add_argument("--use-unicode-char-labels", action="store_true")
+    parser.add_argument("--use-char-embedding", action="store_true")
+    parser.add_argument("--use-ids-conditioning", action="store_true")
+    parser.add_argument("--ids-path", default="")
+    parser.add_argument("--num-style-refs", type=int, default=None)
+    parser.add_argument("--style-ref-mode", choices=["single", "mean", "max"], default=None)
+    parser.add_argument("--binary-loss-weight", type=float, default=None)
+    parser.add_argument("--edge-loss-weight", type=float, default=None)
+    parser.add_argument("--projection-loss-weight", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=0.0)
     parser.add_argument("--save-last-freq", type=int, default=10)
     parser.add_argument("--eval-freq", type=int, default=10)
@@ -195,8 +205,23 @@ def main() -> None:
     if not base_checkpoint.is_file() and not args.dry_run:
         raise FileNotFoundError(f"Base checkpoint not found: {base_checkpoint}")
 
+    upgrade_enabled = args.upgrade_anti_hallucination
+    use_unicode_char_labels = args.use_unicode_char_labels or upgrade_enabled or args.use_ids_conditioning
+    use_char_embedding = args.use_char_embedding or upgrade_enabled
+    use_ids_conditioning = args.use_ids_conditioning
+    if use_ids_conditioning and not args.ids_path:
+        raise ValueError("--use-ids-conditioning requires --ids-path.")
+    num_style_refs = args.num_style_refs if args.num_style_refs is not None else (8 if upgrade_enabled else 1)
+    style_ref_mode = args.style_ref_mode or ("mean" if upgrade_enabled else "single")
+    binary_loss_weight = args.binary_loss_weight if args.binary_loss_weight is not None else (0.15 if upgrade_enabled else 0.0)
+    edge_loss_weight = args.edge_loss_weight if args.edge_loss_weight is not None else (0.10 if upgrade_enabled else 0.0)
+    projection_loss_weight = args.projection_loss_weight if args.projection_loss_weight is not None else (0.05 if upgrade_enabled else 0.0)
+
     num_fonts = int(dataset_info["num_fonts"])
-    num_chars = int(dataset_info["num_chars"])
+    if use_unicode_char_labels:
+        num_chars = int(dataset_info.get("num_unicode_chars", dataset_info["num_chars"]))
+    else:
+        num_chars = int(dataset_info["num_chars"])
 
     cmd = [
         sys.executable,
@@ -208,6 +233,8 @@ def main() -> None:
         "--model", "JiT-L/16",
         "--num_fonts", str(num_fonts),
         "--num_chars", str(num_chars),
+        "--num_style_refs", str(num_style_refs),
+        "--style_ref_mode", style_ref_mode,
         "--img_size", "256",
         "--lora_r", str(args.lora_r),
         "--lora_alpha", str(args.lora_alpha),
@@ -241,6 +268,18 @@ def main() -> None:
         cmd.append("--infinite")
     if args.train_style_encoder:
         cmd.append("--train_style_encoder")
+    if use_unicode_char_labels:
+        cmd.extend(["--use_unicode_char_labels", "--unicode_codepoints_path", str(dataset_dir / "dataset_info.json")])
+    if use_char_embedding:
+        cmd.append("--use_char_embedding")
+    if use_ids_conditioning:
+        cmd.extend(["--use_ids_conditioning", "--ids_path", args.ids_path])
+    if binary_loss_weight > 0:
+        cmd.extend(["--binary_loss_weight", str(binary_loss_weight)])
+    if edge_loss_weight > 0:
+        cmd.extend(["--edge_loss_weight", str(edge_loss_weight)])
+    if projection_loss_weight > 0:
+        cmd.extend(["--projection_loss_weight", str(projection_loss_weight)])
     if args.resume:
         cmd.extend(["--resume", args.resume])
 
@@ -250,6 +289,14 @@ def main() -> None:
     print(f"  num_fonts   = {num_fonts}")
     print(f"  num_chars   = {num_chars}")
     print(f"  checkpoint  = {base_checkpoint}")
+    print(f"  unicode_labels = {use_unicode_char_labels}")
+    print(f"  char_embedding = {use_char_embedding}")
+    print(f"  ids_conditioning = {use_ids_conditioning}")
+    print(f"  num_style_refs = {num_style_refs}")
+    print(f"  style_ref_mode = {style_ref_mode}")
+    print(f"  binary_loss_weight = {binary_loss_weight}")
+    print(f"  edge_loss_weight = {edge_loss_weight}")
+    print(f"  projection_loss_weight = {projection_loss_weight}")
     if not base_checkpoint.is_file():
         print("  checkpoint_status = missing on this machine (dry-run only)")
         if args.auto_download_checkpoint and args.checkpoint_url:

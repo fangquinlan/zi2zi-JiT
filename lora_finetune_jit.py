@@ -24,6 +24,8 @@ from main_jit import FontSrcTargetRefsDataset, collate_src_target_refs, get_args
 from util.crop import resize_and_random_crop
 from util.misc import save_model_no_ema, save_named_model_no_ema
 import util.misc as misc
+from util.unicode_labels import load_unicode_codepoints
+from util.ids_utils import build_ids_resources
 
 
 def main(args):
@@ -63,9 +65,16 @@ def main(args):
         root=args.data_path,
         transform=transform_train,
         ref_size=128,
-        max_chars_per_font=args.max_chars_per_font
+        max_chars_per_font=args.max_chars_per_font,
+        num_style_refs=args.num_style_refs,
+        use_unicode_char_labels=args.use_unicode_char_labels,
+        unicode_codepoints=load_unicode_codepoints(args.unicode_codepoints_path) if args.unicode_codepoints_path else None,
     )
     print(f"Dataset: {len(dataset_train)} samples, {dataset_train.num_fonts} fonts")
+
+    if args.use_unicode_char_labels and not getattr(args, "unicode_codepoints", None):
+        args.unicode_codepoints = list(dataset_train.unicode_codepoints)
+        args.num_chars = dataset_train.num_chars
 
     if dataset_train.num_fonts != args.num_fonts:
         print(f"Warning: Different num_fonts from args {args.num_fonts} to dataset {dataset_train.num_fonts}")
@@ -91,7 +100,27 @@ def main(args):
     torch._dynamo.config.cache_size_limit = 128
     torch._dynamo.config.optimize_ddp = False
 
+    if args.use_ids_conditioning:
+        if not args.use_unicode_char_labels:
+            raise ValueError("--use_ids_conditioning requires --use_unicode_char_labels.")
+        if not args.ids_path:
+            raise ValueError("--use_ids_conditioning requires --ids_path.")
+        ids_resources = build_ids_resources(args.unicode_codepoints, args.ids_path)
+        args.ids_vocab_size = ids_resources["ids_vocab_size"]
+        args.ids_max_len = ids_resources["ids_max_len"]
+    else:
+        ids_resources = None
+        args.ids_vocab_size = 0
+        args.ids_max_len = 0
+
     model = Denoiser(args)
+    if ids_resources is not None:
+        model.net.y_embedder.set_ids_lookup(ids_resources["ids_token_ids"], ids_resources["ids_token_mask"])
+        if ids_resources["missing_codepoints"]:
+            print(
+                f"Warning: IDS file does not cover {len(ids_resources['missing_codepoints'])} training codepoints. "
+                "Those characters will receive a zero IDS embedding."
+            )
     model.update_ema = lambda: None
 
     base_ckpt_path = resolve_checkpoint_path(args.base_checkpoint) if args.base_checkpoint else None

@@ -32,6 +32,7 @@ import cv2
 
 import util.misc as misc
 from util.lora_utils import inject_lora, _is_lora_state_dict
+from util.unicode_labels import build_unicode_index_map
 
 
 DEFAULT_STEPS_BY_METHOD = {
@@ -286,6 +287,34 @@ def main(args):
         print(f"Loaded unicode labels, will use U+XXXX filenames")
     else:
         print("unicode_labels not found in npz, using index-based filenames")
+
+    if getattr(ckpt_args, 'use_unicode_char_labels', False):
+        unicode_codepoints = getattr(ckpt_args, 'unicode_codepoints', None)
+        if not unicode_codepoints:
+            raise RuntimeError(
+                "Checkpoint expects Unicode-aware char labels, but ckpt_args.unicode_codepoints is missing."
+            )
+        if unicode_labels_all is None:
+            raise RuntimeError(
+                "Checkpoint expects Unicode-aware char labels, but unicode_labels are missing from the npz."
+            )
+        index_map = build_unicode_index_map(unicode_codepoints)
+        remapped = np.empty_like(char_labels_all)
+        missing = set()
+        for idx, codepoint in enumerate(unicode_labels_all):
+            codepoint = int(codepoint)
+            if codepoint not in index_map:
+                missing.add(codepoint)
+                remapped[idx] = 0
+            else:
+                remapped[idx] = index_map[codepoint]
+        if missing:
+            preview = ", ".join(f"U+{cp:04X}" for cp in sorted(missing)[:8])
+            raise RuntimeError(
+                "The provided npz contains Unicode labels that are outside the training label space: "
+                f"{preview}"
+            )
+        char_labels_all = remapped
 
     num_total_samples = len(font_labels_all)
     num_images = args.num_images if args.num_images else num_total_samples

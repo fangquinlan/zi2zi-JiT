@@ -10,6 +10,7 @@ import util.misc as misc
 import util.lr_sched as lr_sched
 import torch_fidelity
 import copy
+from util.unicode_labels import build_unicode_index_map
 
 
 def _resolve_fid_statistics_file(img_size):
@@ -23,6 +24,42 @@ def _resolve_fid_statistics_file(img_size):
     if not os.path.exists(fid_statistics_file):
         raise FileNotFoundError(f"FID statistics file not found: {fid_statistics_file}")
     return fid_statistics_file
+
+
+def _maybe_remap_char_labels(char_labels_all, test_data, args):
+    if not getattr(args, 'use_unicode_char_labels', False):
+        return char_labels_all
+
+    unicode_codepoints = getattr(args, 'unicode_codepoints', None)
+    if not unicode_codepoints:
+        raise RuntimeError(
+            "use_unicode_char_labels is enabled, but args.unicode_codepoints is missing. "
+            "Pass --unicode_codepoints_path or ensure the training script populates it."
+        )
+    if 'unicode_labels' not in test_data:
+        raise RuntimeError(
+            "use_unicode_char_labels is enabled, but unicode_labels are missing from the evaluation npz."
+        )
+
+    index_map = build_unicode_index_map(unicode_codepoints)
+    unicode_labels_all = test_data['unicode_labels']
+    remapped = np.empty_like(char_labels_all)
+    missing = set()
+    for idx, codepoint in enumerate(unicode_labels_all):
+        codepoint = int(codepoint)
+        if codepoint not in index_map:
+            missing.add(codepoint)
+            remapped[idx] = 0
+        else:
+            remapped[idx] = index_map[codepoint]
+
+    if missing:
+        preview = ", ".join(f"U+{cp:04X}" for cp in sorted(missing)[:8])
+        raise RuntimeError(
+            "Evaluation unicode labels are not covered by the training unicode mapping: "
+            f"{preview}"
+        )
+    return remapped
 
 
 def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, epoch, log_writer=None, args=None):
@@ -80,6 +117,7 @@ def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, ep
         metric_logger.update(lr=lr)
 
         loss_value_reduce = misc.all_reduce_mean(loss_value)
+        loss_breakdown = model_without_ddp.get_last_loss_breakdown() if hasattr(model_without_ddp, "get_last_loss_breakdown") else {}
 
         if log_writer is not None:
             # Use epoch_1000x as the x-axis in TensorBoard to calibrate curves.
@@ -87,6 +125,9 @@ def train_one_epoch(model, model_without_ddp, data_loader, optimizer, device, ep
             if data_iter_step % args.log_freq == 0:
                 log_writer.add_scalar('train_loss', loss_value_reduce, epoch_1000x)
                 log_writer.add_scalar('lr', lr, epoch_1000x)
+                for key, value in loss_breakdown.items():
+                    if key != "total_loss":
+                        log_writer.add_scalar(key, value, epoch_1000x)
 
 
 def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None):
@@ -98,6 +139,7 @@ def evaluate(model_without_ddp, args, epoch, batch_size=64, log_writer=None):
     test_data = np.load(args.test_npz_path)
     font_labels_all = test_data['font_labels']
     char_labels_all = test_data['char_labels']
+    char_labels_all = _maybe_remap_char_labels(char_labels_all, test_data, args)
     style_images_all = test_data['style_images']
     content_images_all = test_data['content_images']
     target_images_all = test_data['target_images']
@@ -291,12 +333,16 @@ def train_one_epoch_single_gpu(model, data_loader, optimizer, device, epoch, log
         metric_logger.update(loss=loss_value)
         lr = optimizer.param_groups[0]["lr"]
         metric_logger.update(lr=lr)
+        loss_breakdown = model.get_last_loss_breakdown() if hasattr(model, "get_last_loss_breakdown") else {}
 
         if log_writer is not None:
             epoch_1000x = int((data_iter_step / len(data_loader) + epoch) * 1000)
             if data_iter_step % args.log_freq == 0:
                 log_writer.add_scalar('train_loss', loss_value, epoch_1000x)
                 log_writer.add_scalar('lr', lr, epoch_1000x)
+                for key, value in loss_breakdown.items():
+                    if key != "total_loss":
+                        log_writer.add_scalar(key, value, epoch_1000x)
 
 
 def evaluate_single_gpu(model, args, epoch, batch_size=64, log_writer=None):
@@ -305,6 +351,7 @@ def evaluate_single_gpu(model, args, epoch, batch_size=64, log_writer=None):
     test_data = np.load(args.test_npz_path)
     font_labels_all = test_data['font_labels']
     char_labels_all = test_data['char_labels']
+    char_labels_all = _maybe_remap_char_labels(char_labels_all, test_data, args)
     style_images_all = test_data['style_images']
     content_images_all = test_data['content_images']
     target_images_all = test_data['target_images']

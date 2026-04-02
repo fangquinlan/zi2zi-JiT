@@ -303,6 +303,8 @@ def prepare_font_target(
         "train_count": len(train_codepoints),
         "test_count": len(test_codepoints),
         "ignored_count": len(ignored),
+        "train_codepoints": train_codepoints,
+        "test_codepoints": test_codepoints,
     }
     if dry_run:
         return result
@@ -467,6 +469,8 @@ def prepare_image_target(
         "train_count": len(train_codepoints),
         "test_count": len(test_codepoints),
         "ignored_count": len(ignored),
+        "train_codepoints": train_codepoints,
+        "test_codepoints": test_codepoints,
         "skipped_files": skipped_files,
     }
     if dry_run:
@@ -616,6 +620,7 @@ def main() -> None:
 
     prepared_fonts: list[dict] = []
     skipped_targets: list[dict] = []
+    global_train_codepoints: set[int] = set()
     font_index = 1
 
     for target_font in font_targets:
@@ -633,6 +638,7 @@ def main() -> None:
                 dry_run=args.dry_run,
             )
             prepared_fonts.append(result)
+            global_train_codepoints.update(result.get("train_codepoints", []))
             print(
                 f"[{font_index:03d}] font {target_font.name}: "
                 f"matched={result['matched_count']} train={result['train_count']} test={result['test_count']}"
@@ -664,6 +670,7 @@ def main() -> None:
                 dry_run=args.dry_run,
             )
             prepared_fonts.append(result)
+            global_train_codepoints.update(result.get("train_codepoints", []))
             skipped_file_count = len(result.get("skipped_files", []))
             print(
                 f"[{font_index:03d}] images {glyph_dir.name}: "
@@ -686,6 +693,7 @@ def main() -> None:
 
     num_fonts = len(prepared_fonts)
     num_chars = max(item["train_count"] for item in prepared_fonts)
+    unicode_codepoints = sorted(global_train_codepoints)
 
     manifest = {
         "created_at": datetime.now().isoformat(),
@@ -698,6 +706,8 @@ def main() -> None:
         "max_train_chars_per_font": args.max_train_chars_per_font,
         "num_fonts": num_fonts,
         "num_chars": num_chars,
+        "num_unicode_chars": len(unicode_codepoints),
+        "unicode_codepoints": [format_codepoint(cp) for cp in unicode_codepoints],
         "fonts": prepared_fonts,
         "skipped_targets": skipped_targets,
     }
@@ -707,6 +717,7 @@ def main() -> None:
         print(f"Usable fonts: {num_fonts}")
         print(f"Recommended --num_fonts: {num_fonts}")
         print(f"Recommended --num_chars: {num_chars}")
+        print(f"Unicode-aware char count: {len(unicode_codepoints)}")
         if skipped_targets:
             print(f"Skipped targets: {len(skipped_targets)}")
         return
@@ -724,6 +735,7 @@ def main() -> None:
     print(f"Output: {output_dir}")
     print(f"Fonts: {num_fonts}")
     print(f"num_chars: {num_chars}")
+    print(f"num_unicode_chars: {len(unicode_codepoints)}")
     print(f"test.npz samples: {test_result['samples']}")
     print(f"Manifest: {output_dir / 'dataset_info.json'}")
 

@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from model_jit import JiT_models
 
 
@@ -17,6 +18,12 @@ class Denoiser(nn.Module):
             proj_drop=args.proj_dropout,
             num_fonts=args.num_fonts,
             num_chars=args.num_chars,
+            use_char_embedding=getattr(args, "use_char_embedding", False),
+            num_style_refs=getattr(args, "num_style_refs", 1),
+            style_ref_mode=getattr(args, "style_ref_mode", "single"),
+            use_ids_conditioning=getattr(args, "use_ids_conditioning", False),
+            ids_vocab_size=getattr(args, "ids_vocab_size", 0),
+            ids_max_len=getattr(args, "ids_max_len", 0),
         )
         self.img_size = args.img_size
         self.num_classes = args.class_num
@@ -40,6 +47,10 @@ class Denoiser(nn.Module):
         self.steps = args.num_sampling_steps
         self.cfg_scale = args.cfg
         self.cfg_interval = (args.interval_min, args.interval_max)
+        self.binary_loss_weight = getattr(args, "binary_loss_weight", 0.0)
+        self.edge_loss_weight = getattr(args, "edge_loss_weight", 0.0)
+        self.projection_loss_weight = getattr(args, "projection_loss_weight", 0.0)
+        self.last_loss_breakdown = {}
 
     def drop_labels(self, labels):
         font_labels, char_labels, style_images, content_images = labels
@@ -51,8 +62,8 @@ class Denoiser(nn.Module):
         font_out = torch.where(drop, torch.full_like(font_labels, self.num_fonts), font_labels)
         char_out = torch.where(drop, torch.full_like(char_labels, self.num_chars), char_labels)
 
-        drop_expanded_style = drop.view(-1, 1, 1, 1).expand_as(style_images)
-        drop_expanded_content = drop.view(-1, 1, 1, 1).expand_as(content_images)
+        drop_expanded_style = drop.view(batch_size, *([1] * (style_images.ndim - 1))).expand_as(style_images)
+        drop_expanded_content = drop.view(batch_size, *([1] * (content_images.ndim - 1))).expand_as(content_images)
 
         style_out = torch.where(drop_expanded_style, torch.ones_like(style_images), style_images)
         content_out = torch.where(drop_expanded_content, torch.ones_like(content_images), content_images)
@@ -76,10 +87,60 @@ class Denoiser(nn.Module):
         v_pred = (x_pred - z) / (1 - t).clamp_min(self.t_eps)
 
         # l2 loss
-        loss = (v - v_pred) ** 2
-        loss = loss.mean(dim=(1, 2, 3)).mean()
+        diffusion_loss = (v - v_pred) ** 2
+        diffusion_loss = diffusion_loss.mean(dim=(1, 2, 3)).mean()
 
-        return loss
+        aux_binary = x_pred.new_zeros(())
+        aux_edge = x_pred.new_zeros(())
+        aux_projection = x_pred.new_zeros(())
+
+        if self.binary_loss_weight > 0 or self.edge_loss_weight > 0 or self.projection_loss_weight > 0:
+            pred_ink = self._to_ink_map(x_pred)
+            target_ink = self._to_ink_map(x)
+            if self.binary_loss_weight > 0:
+                aux_binary = F.l1_loss(pred_ink, target_ink)
+            if self.edge_loss_weight > 0:
+                aux_edge = F.l1_loss(self._sobel_edges(pred_ink), self._sobel_edges(target_ink))
+            if self.projection_loss_weight > 0:
+                aux_projection = self._projection_consistency_loss(pred_ink, target_ink)
+
+        total_loss = (
+            diffusion_loss
+            + self.binary_loss_weight * aux_binary
+            + self.edge_loss_weight * aux_edge
+            + self.projection_loss_weight * aux_projection
+        )
+        self.last_loss_breakdown = {
+            "diffusion_loss": float(diffusion_loss.detach().item()),
+            "binary_loss": float(aux_binary.detach().item()),
+            "edge_loss": float(aux_edge.detach().item()),
+            "projection_loss": float(aux_projection.detach().item()),
+            "total_loss": float(total_loss.detach().item()),
+        }
+
+        return total_loss
+
+    def _to_ink_map(self, image):
+        gray = (image + 1.0) * 0.5
+        gray = gray.mean(dim=1, keepdim=True).clamp(0.0, 1.0)
+        return 1.0 - gray
+
+    def _sobel_edges(self, ink):
+        kernel_x = ink.new_tensor([[-1.0, 0.0, 1.0], [-2.0, 0.0, 2.0], [-1.0, 0.0, 1.0]]).view(1, 1, 3, 3)
+        kernel_y = ink.new_tensor([[-1.0, -2.0, -1.0], [0.0, 0.0, 0.0], [1.0, 2.0, 1.0]]).view(1, 1, 3, 3)
+        grad_x = F.conv2d(ink, kernel_x, padding=1)
+        grad_y = F.conv2d(ink, kernel_y, padding=1)
+        return torch.sqrt(grad_x.pow(2) + grad_y.pow(2) + 1e-6)
+
+    def _projection_consistency_loss(self, pred_ink, target_ink):
+        pred_rows = pred_ink.mean(dim=3)
+        pred_cols = pred_ink.mean(dim=2)
+        target_rows = target_ink.mean(dim=3)
+        target_cols = target_ink.mean(dim=2)
+        return F.l1_loss(pred_rows, target_rows) + F.l1_loss(pred_cols, target_cols)
+
+    def get_last_loss_breakdown(self):
+        return dict(self.last_loss_breakdown)
 
     @torch.no_grad()
     def generate(self, labels):

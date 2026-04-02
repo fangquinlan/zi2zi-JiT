@@ -80,12 +80,20 @@ class TimestepEmbedder(nn.Module):
 
 class LabelEmbedder(nn.Module):
     def __init__(self, num_classes, hidden_size, num_fonts=100, num_chars=500,
-                 style_image_size=128, content_image_size=256):
+                 style_image_size=128, content_image_size=256,
+                 use_char_embedding=False, num_style_refs=1, style_ref_mode="single",
+                 use_ids_conditioning=False, ids_vocab_size=0, ids_max_len=0):
         super().__init__()
         self.font_embedding = nn.Embedding(num_fonts + 1, hidden_size)
+        self.char_embedding = nn.Embedding(num_chars + 1, hidden_size) if use_char_embedding else None
+        self.ids_embedding = nn.Embedding(ids_vocab_size + 1, hidden_size) if use_ids_conditioning else None
         self.num_fonts = num_fonts
         self.num_chars = num_chars
         self.num_classes = num_classes
+        self.use_char_embedding = use_char_embedding
+        self.use_ids_conditioning = use_ids_conditioning
+        self.num_style_refs = num_style_refs
+        self.style_ref_mode = style_ref_mode
 
         self.style_encoder = StyleEncoder(hidden_size=hidden_size)
         self.content_encoder = ContentEncoder(hidden_size=hidden_size)
@@ -101,6 +109,12 @@ class LabelEmbedder(nn.Module):
             'white_content_image',
             torch.ones(1, 3, content_image_size, content_image_size)
         )
+        if use_ids_conditioning:
+            self.register_buffer('ids_token_ids', torch.zeros(num_chars + 1, ids_max_len, dtype=torch.long))
+            self.register_buffer('ids_token_mask', torch.zeros(num_chars + 1, ids_max_len, dtype=torch.float32))
+        else:
+            self.ids_token_ids = None
+            self.ids_token_mask = None
 
     def encode(self, labels, category_drop_prob=0.4):
         font_labels, char_labels, style_images, content_images = labels
@@ -109,21 +123,68 @@ class LabelEmbedder(nn.Module):
             batch_size = font_labels.shape[0]
             drop_mask = torch.rand(batch_size, device=font_labels.device) < category_drop_prob
             font_labels = torch.where(drop_mask, self.num_fonts, font_labels)
+            if self.char_embedding is not None or self.ids_embedding is not None:
+                char_labels = torch.where(drop_mask, torch.full_like(char_labels, self.num_chars), char_labels)
 
         font_emb = self.font_embedding(font_labels)
+        char_emb = self.char_embedding(char_labels) if self.char_embedding is not None else None
+        ids_emb = self._lookup_ids_embedding(char_labels) if self.ids_embedding is not None else None
 
         batch_size = font_labels.shape[0]
 
         if style_images is None:
-            style_images = self.white_style_image.expand(batch_size, -1, -1, -1)
+            if self.num_style_refs > 1 and self.style_ref_mode != "single":
+                style_images = self.white_style_image.unsqueeze(1).expand(batch_size, self.num_style_refs, -1, -1, -1)
+            else:
+                style_images = self.white_style_image.expand(batch_size, -1, -1, -1)
         if content_images is None:
             content_images = self.white_content_image.expand(batch_size, -1, -1, -1)
 
-        style_emb = self.style_encoder(style_images)
+        style_emb = self._encode_style_images(style_images)
         content_emb = self.content_encoder(content_images)
 
         combined_emb = font_emb + style_emb + content_emb
-        return combined_emb, font_emb, content_emb, style_emb
+        if char_emb is not None:
+            combined_emb = combined_emb + char_emb
+        if ids_emb is not None:
+            combined_emb = combined_emb + ids_emb
+        return combined_emb, font_emb, content_emb, style_emb, char_emb, ids_emb
+
+    def _encode_style_images(self, style_images):
+        if style_images.ndim == 4:
+            return self.style_encoder(style_images)
+        if style_images.ndim != 5:
+            raise ValueError(
+                f"Expected style_images with 4 or 5 dims, got shape={tuple(style_images.shape)}"
+            )
+
+        batch_size, num_refs, channels, height, width = style_images.shape
+        encoded = self.style_encoder(style_images.reshape(batch_size * num_refs, channels, height, width))
+        encoded = encoded.view(batch_size, num_refs, -1)
+        if self.style_ref_mode == "single":
+            return encoded[:, 0]
+        if self.style_ref_mode == "max":
+            return encoded.max(dim=1).values
+        return encoded.mean(dim=1)
+
+    def _lookup_ids_embedding(self, char_labels):
+        token_ids = self.ids_token_ids[char_labels]
+        token_mask = self.ids_token_mask[char_labels].unsqueeze(-1)
+        token_emb = self.ids_embedding(token_ids)
+        denom = token_mask.sum(dim=1).clamp_min(1.0)
+        return (token_emb * token_mask).sum(dim=1) / denom
+
+    def set_ids_lookup(self, token_ids, token_mask):
+        if self.ids_embedding is None:
+            raise RuntimeError("IDS conditioning is not enabled for this LabelEmbedder.")
+        if token_ids.shape != self.ids_token_ids.shape or token_mask.shape != self.ids_token_mask.shape:
+            raise ValueError(
+                "IDS lookup table shape mismatch: "
+                f"expected token_ids={tuple(self.ids_token_ids.shape)}, token_mask={tuple(self.ids_token_mask.shape)}, "
+                f"got token_ids={tuple(token_ids.shape)}, token_mask={tuple(token_mask.shape)}"
+            )
+        self.ids_token_ids.copy_(token_ids)
+        self.ids_token_mask.copy_(token_mask)
 
     def forward(self, labels, category_drop_prob=0.4):
         return self.encode(labels, category_drop_prob=category_drop_prob)
@@ -260,7 +321,13 @@ class JiT(nn.Module):
         in_context_len=32,
         in_context_start=8,
         num_fonts=100,
-        num_chars=500
+        num_chars=500,
+        use_char_embedding=False,
+        num_style_refs=1,
+        style_ref_mode="single",
+        use_ids_conditioning=False,
+        ids_vocab_size=0,
+        ids_max_len=0,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -274,10 +341,22 @@ class JiT(nn.Module):
         self.num_classes = num_classes
         self.num_fonts = num_fonts
         self.num_chars = num_chars
+        self.use_char_embedding = use_char_embedding
 
         # time and class embed
         self.t_embedder = TimestepEmbedder(hidden_size)
-        self.y_embedder = LabelEmbedder(num_classes, hidden_size, num_fonts=num_fonts, num_chars=num_chars)
+        self.y_embedder = LabelEmbedder(
+            num_classes,
+            hidden_size,
+            num_fonts=num_fonts,
+            num_chars=num_chars,
+            use_char_embedding=use_char_embedding,
+            num_style_refs=num_style_refs,
+            style_ref_mode=style_ref_mode,
+            use_ids_conditioning=use_ids_conditioning,
+            ids_vocab_size=ids_vocab_size,
+            ids_max_len=ids_max_len,
+        )
 
         # linear embed
         self.x_embedder = BottleneckPatchEmbed(input_size, patch_size, in_channels, bottleneck_dim, hidden_size, bias=True)
@@ -339,6 +418,10 @@ class JiT(nn.Module):
         nn.init.constant_(self.x_embedder.proj2.bias, 0)
 
         nn.init.normal_(self.y_embedder.font_embedding.weight, std=0.02)
+        if self.y_embedder.char_embedding is not None:
+            nn.init.normal_(self.y_embedder.char_embedding.weight, std=0.02)
+        if self.y_embedder.ids_embedding is not None:
+            nn.init.normal_(self.y_embedder.ids_embedding.weight, std=0.02)
 
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
         nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
@@ -386,7 +469,7 @@ class JiT(nn.Module):
         """
         # class and time embeddings
         t_emb = self.t_embedder(t)
-        y_emb, font_emb, content_emb, style_emb = conditioning
+        y_emb, font_emb, content_emb, style_emb, char_emb, ids_emb = conditioning
         c = t_emb + y_emb
 
         # forward JiT
@@ -397,14 +480,18 @@ class JiT(nn.Module):
             # in-context
             if self.in_context_len > 0 and i == self.in_context_start:
                 n_font = 2
-                n_content = (self.in_context_len - n_font) // 2
-                n_style = self.in_context_len - n_font - n_content
+                n_char = 1 if (self.use_char_embedding and char_emb is not None and self.in_context_len >= 3) else 0
+                n_content = (self.in_context_len - n_font - n_char) // 2
+                n_style = self.in_context_len - n_font - n_content - n_char
 
                 font_tokens = font_emb.unsqueeze(1).repeat(1, n_font, 1)
                 content_tokens = content_emb.unsqueeze(1).repeat(1, n_content, 1)
                 style_tokens = style_emb.unsqueeze(1).repeat(1, n_style, 1)
-
-                in_context_tokens = torch.cat([font_tokens, content_tokens, style_tokens], dim=1)
+                token_groups = [font_tokens]
+                if n_char > 0:
+                    token_groups.append(char_emb.unsqueeze(1))
+                token_groups.extend([content_tokens, style_tokens])
+                in_context_tokens = torch.cat(token_groups, dim=1)
                 in_context_tokens += self.in_context_posemb
                 x = torch.cat([in_context_tokens, x], dim=1)
             x = block(x, c, self.feat_rope if i < self.in_context_start else self.feat_rope_incontext)

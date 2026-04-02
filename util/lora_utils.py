@@ -162,6 +162,25 @@ def _adapt_font_embedding_weight(
     return adapted, messages
 
 
+def _initialize_missing_optional_embeddings(
+        state_dict: dict[str, torch.Tensor],
+        model_state_dict: dict[str, torch.Tensor],
+):
+    adapted = dict(state_dict)
+    messages = []
+    optional_keys = [
+        "net.y_embedder.char_embedding.weight",
+        "net.y_embedder.ids_embedding.weight",
+        "net.y_embedder.ids_token_ids",
+        "net.y_embedder.ids_token_mask",
+    ]
+    for key in optional_keys:
+        if key in model_state_dict and key not in adapted:
+            adapted[key] = model_state_dict[key].clone()
+            messages.append(f"Initialized missing checkpoint parameter from current model init: {key}")
+    return adapted, messages
+
+
 def load_state_dict_with_font_embedding_resize(
         model: nn.Module,
         state_dict: dict[str, torch.Tensor],
@@ -170,6 +189,8 @@ def load_state_dict_with_font_embedding_resize(
 ):
     model_state_dict = model.state_dict()
     adapted_state_dict, messages = _adapt_font_embedding_weight(state_dict, model_state_dict)
+    adapted_state_dict, optional_messages = _initialize_missing_optional_embeddings(adapted_state_dict, model_state_dict)
+    messages.extend(optional_messages)
 
     shape_mismatches = []
     for key, value in adapted_state_dict.items():

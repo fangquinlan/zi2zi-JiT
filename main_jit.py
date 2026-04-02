@@ -14,6 +14,11 @@ from PIL import Image
 
 from util.crop import resize_and_random_crop
 import util.misc as misc
+from util.unicode_labels import (
+    load_unicode_codepoints,
+    parse_unicode_codepoint_from_name,
+)
+from util.ids_utils import build_ids_resources
 
 import copy
 from engine_jit import train_one_epoch, evaluate
@@ -22,11 +27,24 @@ from denoiser import Denoiser
 
 
 class FontSrcTargetRefsDataset(torch.utils.data.Dataset):
-    def __init__(self, root, transform=None, ref_size=128, max_chars_per_font=None):
+    def __init__(
+        self,
+        root,
+        transform=None,
+        ref_size=128,
+        max_chars_per_font=None,
+        num_style_refs=1,
+        use_unicode_char_labels=False,
+        unicode_codepoints=None,
+    ):
         self.root = root
         self.transform = transform
         self.ref_size = ref_size
         self.max_chars_per_font = max_chars_per_font
+        self.num_style_refs = num_style_refs
+        self.use_unicode_char_labels = use_unicode_char_labels
+        if not (1 <= self.num_style_refs <= 8):
+            raise ValueError(f"num_style_refs must be between 1 and 8, got {self.num_style_refs}")
 
         self.samples = []
 
@@ -45,6 +63,7 @@ class FontSrcTargetRefsDataset(torch.utils.data.Dataset):
         self.num_fonts = max(self.font_to_idx.values()) + 1 if self.font_to_idx else 0
 
         char_indices_set = set()
+        unicode_codepoints_set = set()
         for font_name in font_dirs:
             font_path = os.path.join(root, font_name)
             font_idx = self.font_to_idx[font_name]
@@ -56,9 +75,14 @@ class FontSrcTargetRefsDataset(torch.utils.data.Dataset):
                         char_idx = int(filename.split('_')[0])
                     except (ValueError, IndexError):
                         continue
+                    unicode_cp = parse_unicode_codepoint_from_name(filename)
+                    if self.use_unicode_char_labels and unicode_cp is None:
+                        continue
                     img_path = os.path.join(font_path, filename)
-                    font_samples.append((img_path, font_idx, char_idx))
+                    font_samples.append((img_path, font_idx, char_idx, unicode_cp))
                     char_indices_set.add(char_idx)
+                    if unicode_cp is not None:
+                        unicode_codepoints_set.add(unicode_cp)
 
             if max_chars_per_font is not None and len(font_samples) > max_chars_per_font:
                 rng = random.Random(font_idx)
@@ -67,7 +91,17 @@ class FontSrcTargetRefsDataset(torch.utils.data.Dataset):
 
             self.samples.extend(font_samples)
 
-        self.num_chars = max(char_indices_set) + 1 if char_indices_set else 0
+        if self.use_unicode_char_labels:
+            if unicode_codepoints is None:
+                self.unicode_codepoints = sorted(unicode_codepoints_set)
+            else:
+                self.unicode_codepoints = [int(cp) for cp in unicode_codepoints]
+            self.unicode_to_idx = {cp: idx for idx, cp in enumerate(self.unicode_codepoints)}
+            self.num_chars = len(self.unicode_codepoints)
+        else:
+            self.unicode_codepoints = []
+            self.unicode_to_idx = {}
+            self.num_chars = max(char_indices_set) + 1 if char_indices_set else 0
 
     def __len__(self):
         return len(self.samples)
@@ -82,21 +116,36 @@ class FontSrcTargetRefsDataset(torch.utils.data.Dataset):
         y2 = y1 + 128
         return img.crop((x1, y1, x2, y2))
 
+    def _extract_refs(self, img):
+        if self.num_style_refs == 1:
+            ref_global_idx = random.randint(0, 7)
+            grid_idx = ref_global_idx // 4
+            ref_idx = ref_global_idx % 4
+            ref = self._extract_ref_from_grid(img, grid_idx, ref_idx)
+            if ref.size[0] != self.ref_size or ref.size[1] != self.ref_size:
+                ref = ref.resize((self.ref_size, self.ref_size), Image.LANCZOS)
+            return ref
+
+        ref_indices = random.sample(range(8), self.num_style_refs)
+        refs = []
+        for ref_global_idx in ref_indices:
+            grid_idx = ref_global_idx // 4
+            ref_idx = ref_global_idx % 4
+            ref = self._extract_ref_from_grid(img, grid_idx, ref_idx)
+            if ref.size[0] != self.ref_size or ref.size[1] != self.ref_size:
+                ref = ref.resize((self.ref_size, self.ref_size), Image.LANCZOS)
+            refs.append(ref)
+        return refs
+
     def __getitem__(self, index):
-        img_path, font_idx, char_idx = self.samples[index]
+        img_path, font_idx, char_idx, unicode_cp = self.samples[index]
 
         img = Image.open(img_path).convert('RGB')
 
         source = img.crop((0, 0, 256, 256))
         target = img.crop((256, 0, 512, 256))
 
-        ref_global_idx = random.randint(0, 7)
-        grid_idx = ref_global_idx // 4
-        ref_idx = ref_global_idx % 4
-        ref = self._extract_ref_from_grid(img, grid_idx, ref_idx)
-
-        if ref.size[0] != self.ref_size or ref.size[1] != self.ref_size:
-            ref = ref.resize((self.ref_size, self.ref_size), Image.LANCZOS)
+        ref = self._extract_refs(img)
 
         to_tensor = transforms.PILToTensor()
         if self.transform is not None:
@@ -108,7 +157,13 @@ class FontSrcTargetRefsDataset(torch.utils.data.Dataset):
             source = to_tensor(source)
             target = to_tensor(target)
 
-        ref = to_tensor(ref)
+        if isinstance(ref, list):
+            ref = torch.stack([to_tensor(item) for item in ref])
+        else:
+            ref = to_tensor(ref)
+
+        if self.use_unicode_char_labels:
+            char_idx = self.unicode_to_idx[unicode_cp]
 
         return source, target, ref, (font_idx, char_idx)
 
@@ -203,6 +258,27 @@ def get_args_parser():
                         help='Number of character classes')
     parser.add_argument('--max_chars_per_font', default=None, type=int,
                         help='Max characters per font (None for no limit)')
+    parser.add_argument('--num_style_refs', default=1, type=int,
+                        help='Number of style reference glyphs sampled from the 8-grid per training sample.')
+    parser.add_argument('--style_ref_mode', default='single', type=str,
+                        choices=['single', 'mean', 'max'],
+                        help='How to aggregate multiple style reference embeddings when num_style_refs > 1.')
+    parser.add_argument('--use_unicode_char_labels', action='store_true',
+                        help='Use Unicode-aware shared character labels instead of per-font local indices.')
+    parser.add_argument('--unicode_codepoints_path', default='', type=str,
+                        help='Optional JSON/TXT file that stores the shared Unicode codepoint list.')
+    parser.add_argument('--use_char_embedding', action='store_true',
+                        help='Add an explicit character embedding/token into the conditioning path.')
+    parser.add_argument('--use_ids_conditioning', action='store_true',
+                        help='Inject IDS token conditioning derived from Unicode labels.')
+    parser.add_argument('--ids_path', default='', type=str,
+                        help='Path to an ids_lv*.txt file from yi-bai/ids.')
+    parser.add_argument('--binary_loss_weight', default=0.0, type=float,
+                        help='Weight for auxiliary ink-mask reconstruction loss.')
+    parser.add_argument('--edge_loss_weight', default=0.0, type=float,
+                        help='Weight for auxiliary edge-structure loss.')
+    parser.add_argument('--projection_loss_weight', default=0.0, type=float,
+                        help='Weight for row/column projection consistency loss.')
 
     # checkpointing
     parser.add_argument('--output_dir', default='./output_dir',
@@ -261,9 +337,16 @@ def main(args):
         root=args.data_path,
         transform=transform_train,
         ref_size=128,
-        max_chars_per_font=args.max_chars_per_font
+        max_chars_per_font=args.max_chars_per_font,
+        num_style_refs=args.num_style_refs,
+        use_unicode_char_labels=args.use_unicode_char_labels,
+        unicode_codepoints=load_unicode_codepoints(args.unicode_codepoints_path) if args.unicode_codepoints_path else None,
     )
     print(f"Dataset: {len(dataset_train)} samples, {dataset_train.num_fonts} fonts")
+
+    if args.use_unicode_char_labels and not getattr(args, "unicode_codepoints", None):
+        args.unicode_codepoints = list(dataset_train.unicode_codepoints)
+        args.num_chars = dataset_train.num_chars
 
     if dataset_train.num_fonts != args.num_fonts:
         print(f"Warning: Different num_fonts from args {args.num_fonts} to dataset {dataset_train.num_fonts}")
@@ -289,8 +372,28 @@ def main(args):
     torch._dynamo.config.cache_size_limit = 128
     torch._dynamo.config.optimize_ddp = False
 
+    if args.use_ids_conditioning:
+        if not args.use_unicode_char_labels:
+            raise ValueError("--use_ids_conditioning requires --use_unicode_char_labels.")
+        if not args.ids_path:
+            raise ValueError("--use_ids_conditioning requires --ids_path.")
+        ids_resources = build_ids_resources(args.unicode_codepoints, args.ids_path)
+        args.ids_vocab_size = ids_resources["ids_vocab_size"]
+        args.ids_max_len = ids_resources["ids_max_len"]
+    else:
+        ids_resources = None
+        args.ids_vocab_size = 0
+        args.ids_max_len = 0
+
     # Create denoiser
     model = Denoiser(args)
+    if ids_resources is not None:
+        model.net.y_embedder.set_ids_lookup(ids_resources["ids_token_ids"], ids_resources["ids_token_mask"])
+        if ids_resources["missing_codepoints"]:
+            print(
+                f"Warning: IDS file does not cover {len(ids_resources['missing_codepoints'])} training codepoints. "
+                "Those characters will receive a zero IDS embedding."
+            )
 
     print("Model =", model)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
