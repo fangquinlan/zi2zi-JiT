@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -85,9 +86,10 @@ def resolve_generated_dir(root: Path) -> Path:
 
 def parse_codepoint_from_name(path: Path) -> int | None:
     stem = path.stem.upper()
-    if stem.startswith("U+"):
+    match = re.search(r"U\+([0-9A-F]{4,6})", stem)
+    if match:
         try:
-            return int(stem[2:], 16)
+            return int(match.group(1), 16)
         except ValueError:
             return None
     if len(stem) == 1:
