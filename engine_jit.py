@@ -45,19 +45,20 @@ def _maybe_remap_char_labels(char_labels_all, test_data, args):
     unicode_labels_all = test_data['unicode_labels']
     remapped = np.empty_like(char_labels_all)
     missing = set()
+    null_char_label = int(getattr(args, 'num_chars', len(unicode_codepoints)))
     for idx, codepoint in enumerate(unicode_labels_all):
         codepoint = int(codepoint)
         if codepoint not in index_map:
             missing.add(codepoint)
-            remapped[idx] = 0
+            remapped[idx] = null_char_label
         else:
             remapped[idx] = index_map[codepoint]
 
     if missing:
         preview = ", ".join(f"U+{cp:04X}" for cp in sorted(missing)[:8])
-        raise RuntimeError(
-            "Evaluation unicode labels are not covered by the training unicode mapping: "
-            f"{preview}"
+        print(
+            "Warning: evaluation unicode labels are not covered by the training unicode mapping. "
+            f"Mapped {len(missing)} unseen codepoints to the null char label so online eval can continue: {preview}"
         )
     return remapped
 
