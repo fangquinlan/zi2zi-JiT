@@ -89,7 +89,27 @@ def resolve_style_folder(train_dir: Path, style_folder: str, font_index: int | N
         if not folder.is_absolute():
             folder = (train_dir / style_folder).resolve()
         if not folder.is_dir():
-            raise FileNotFoundError(f"Style folder not found: {folder}")
+            candidates = sorted(
+                p for p in train_dir.iterdir()
+                if p.is_dir()
+                and not p.name.startswith(".")
+                and (
+                    p.name == style_folder
+                    or p.name.split("_", 1)[-1] == style_folder
+                )
+            )
+            if not candidates:
+                raise FileNotFoundError(
+                    f"Style folder not found: {folder}. "
+                    f"Try the full folder name such as '005_{style_folder}' or use --font-index."
+                )
+            if len(candidates) > 1:
+                names = ", ".join(p.name for p in candidates)
+                raise RuntimeError(
+                    f"Multiple style folders matched '{style_folder}': {names}. "
+                    "Please pass the full folder name or use --font-index."
+                )
+            return candidates[0]
         return folder
 
     candidates = sorted(

@@ -30,5 +30,5 @@ def maybe_reexec_with_repo_python(script_path: str | Path, repo_root: str | Path
     env = os.environ.copy()
     env["ZI2ZI_SKIP_REEXEC"] = "1"
     cmd = [str(venv_python), str(script_path), *sys.argv[1:]]
-    subprocess.run(cmd, check=True, cwd=repo_root, env=env)
-    raise SystemExit(0)
+    result = subprocess.run(cmd, check=False, cwd=repo_root, env=env)
+    raise SystemExit(result.returncode)
