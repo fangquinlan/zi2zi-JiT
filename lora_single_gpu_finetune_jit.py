@@ -220,6 +220,7 @@ def main(args):
         for message in load_messages:
             print(message)
         print("Loaded vanilla base checkpoint from", base_ckpt_path)
+        model.refresh_semantic_consistency_encoder_from_content()
 
     targets = [t.strip() for t in args.lora_targets.split(",") if t.strip()]
     replaced = inject_lora(model.net, targets, r=args.lora_r, alpha=args.lora_alpha, dropout=args.lora_dropout)
@@ -230,6 +231,7 @@ def main(args):
         for message in load_messages:
             print(message)
         print("Loaded LoRA base checkpoint from", base_ckpt_path)
+        model.refresh_semantic_consistency_encoder_from_content()
 
     mark_only_lora_as_trainable(
         model,
@@ -266,6 +268,7 @@ def main(args):
         load_messages = load_state_dict_with_font_embedding_resize(model, checkpoint["model"], strict=True)
         for message in load_messages:
             print(message)
+        model.refresh_semantic_consistency_encoder_from_content()
         if "epoch" in checkpoint:
             args.start_epoch = checkpoint["epoch"] + 1
         if "best_fid" in checkpoint:

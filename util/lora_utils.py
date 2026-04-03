@@ -183,9 +183,16 @@ def _initialize_missing_optional_embeddings(
         "ids_consistency_head.weight",
         "ids_consistency_head.bias",
     ]
+    optional_prefixes = [
+        "semantic_consistency_encoder.",
+    ]
     for key in optional_keys:
         if key in model_state_dict and key not in adapted:
             adapted[key] = model_state_dict[key].clone()
+            messages.append(f"Initialized missing checkpoint parameter from current model init: {key}")
+    for key, value in model_state_dict.items():
+        if key not in adapted and any(key.startswith(prefix) for prefix in optional_prefixes):
+            adapted[key] = value.clone()
             messages.append(f"Initialized missing checkpoint parameter from current model init: {key}")
     return adapted, messages
 

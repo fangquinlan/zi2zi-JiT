@@ -258,11 +258,11 @@ def main() -> None:
             "use_ids_conditioning": True,
             "num_style_refs": 8,
             "style_ref_mode": "mean",
-            "binary_loss_weight": 0.10,
-            "edge_loss_weight": 0.08,
-            "projection_loss_weight": 0.04,
-            "char_loss_weight": 0.06,
-            "ids_loss_weight": 0.02,
+            "binary_loss_weight": 0.06,
+            "edge_loss_weight": 0.04,
+            "projection_loss_weight": 0.02,
+            "char_loss_weight": 0.0,
+            "ids_loss_weight": 0.0,
         },
     }
     defaults = profile_defaults.get(profile, {})

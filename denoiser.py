@@ -1,3 +1,5 @@
+import copy
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -55,6 +57,12 @@ class Denoiser(nn.Module):
         self.char_consistency_head = nn.Linear(self.net.hidden_size, args.num_chars) if self.char_loss_weight > 0 else None
         ids_vocab_size = int(getattr(args, "ids_vocab_size", 0))
         self.ids_consistency_head = nn.Linear(self.net.hidden_size, ids_vocab_size + 1) if self.ids_loss_weight > 0 and ids_vocab_size > 0 else None
+        if self.char_consistency_head is not None or self.ids_consistency_head is not None:
+            self.semantic_consistency_encoder = copy.deepcopy(self.net.y_embedder.content_encoder)
+            for param in self.semantic_consistency_encoder.parameters():
+                param.requires_grad = False
+        else:
+            self.semantic_consistency_encoder = None
         self.last_loss_breakdown = {}
 
     def drop_labels(self, labels):
@@ -113,7 +121,7 @@ class Denoiser(nn.Module):
                 aux_projection = self._projection_consistency_loss(pred_ink, target_ink)
 
         if self.char_consistency_head is not None or self.ids_consistency_head is not None:
-            semantic_feat = self.net.y_embedder.content_encoder(x_pred)
+            semantic_feat = self.semantic_consistency_encoder(x_pred)
             if self.char_consistency_head is not None:
                 char_logits = self.char_consistency_head(semantic_feat).float()
                 aux_char = F.cross_entropy(char_logits, char_labels)
@@ -163,6 +171,14 @@ class Denoiser(nn.Module):
 
     def get_last_loss_breakdown(self):
         return dict(self.last_loss_breakdown)
+
+    def refresh_semantic_consistency_encoder_from_content(self):
+        if self.semantic_consistency_encoder is None:
+            return
+        self.semantic_consistency_encoder.load_state_dict(self.net.y_embedder.content_encoder.state_dict())
+        self.semantic_consistency_encoder.eval()
+        for param in self.semantic_consistency_encoder.parameters():
+            param.requires_grad = False
 
     @torch.no_grad()
     def generate(self, labels):

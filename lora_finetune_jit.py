@@ -143,6 +143,7 @@ def main(args):
         for message in load_messages:
             print(message)
         print("Loaded vanilla base checkpoint from", base_ckpt_path)
+        model.refresh_semantic_consistency_encoder_from_content()
 
     targets = [t.strip() for t in args.lora_targets.split(",") if t.strip()]
     replaced = inject_lora(model.net, targets, r=args.lora_r, alpha=args.lora_alpha, dropout=args.lora_dropout)
@@ -153,6 +154,7 @@ def main(args):
         for message in load_messages:
             print(message)
         print("Loaded LoRA base checkpoint from", base_ckpt_path)
+        model.refresh_semantic_consistency_encoder_from_content()
 
     mark_only_lora_as_trainable(
         model,
@@ -201,6 +203,7 @@ def main(args):
         )
         for message in load_messages:
             print(message)
+        model_without_ddp.refresh_semantic_consistency_encoder_from_content()
 
         model_without_ddp.ema_params1 = list(model_without_ddp.parameters())
         model_without_ddp.ema_params2 = list(model_without_ddp.parameters())

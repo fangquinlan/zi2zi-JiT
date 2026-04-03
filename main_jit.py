@@ -19,6 +19,7 @@ from util.unicode_labels import (
     parse_unicode_codepoint_from_name,
 )
 from util.ids_utils import build_ids_resources
+from util.lora_utils import load_state_dict_with_font_embedding_resize
 
 import copy
 from engine_jit import train_one_epoch, evaluate
@@ -425,7 +426,10 @@ def main(args):
     checkpoint_path = os.path.join(args.resume, "checkpoint-last.pth") if args.resume else None
     if checkpoint_path and os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-        model_without_ddp.load_state_dict(checkpoint['model'])
+        load_messages = load_state_dict_with_font_embedding_resize(model_without_ddp, checkpoint['model'], strict=True)
+        for message in load_messages:
+            print(message)
+        model_without_ddp.refresh_semantic_consistency_encoder_from_content()
 
         ema_state_dict1 = checkpoint['model_ema1']
         ema_state_dict2 = checkpoint['model_ema2']
