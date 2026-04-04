@@ -8,6 +8,7 @@ import json
 import random
 import shutil
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -70,6 +71,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--regions", default="", help="Optional comma-separated subset of regions, e.g. SC,TC,JP.")
     parser.add_argument("--limit-fonts-per-region", type=int, default=None, help="Optional debug limit per region.")
+    parser.add_argument("--workers", type=int, default=1, help="Number of worker processes for per-font dataset generation.")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--resume", action="store_true", help="Resume into an existing output directory and skip completed shards.")
     parser.add_argument("--dry-run", action="store_true")
@@ -141,6 +143,10 @@ def shard_is_complete(metadata_path: Path, expected_count: int) -> tuple[bool, i
 def build_source_specs(input_root: Path, region: str, resolution: int, dry_run: bool) -> list[SourceFontSpec]:
     source_paths = [input_root / REGION_SOURCE_FONTS[region]]
     source_paths.extend(input_root / name for name in SUPPLEMENT_SOURCE_FONTS)
+    return build_source_specs_from_paths(source_paths, resolution, dry_run)
+
+
+def build_source_specs_from_paths(source_paths: list[Path], resolution: int, dry_run: bool) -> list[SourceFontSpec]:
 
     specs: list[SourceFontSpec] = []
     for path in source_paths:
@@ -232,6 +238,238 @@ def write_composite(
     return True, source_spec.path.name
 
 
+def process_font_task(task: dict) -> dict:
+    region = task["region"]
+    font_index = int(task["font_index"])
+    subgroup = task["subgroup"]
+    kana_only = bool(task["kana_only"])
+    font_name = task["font_name"]
+    target_font_path = Path(task["target_font"])
+    source_font_paths = [Path(path) for path in task["source_fonts"]]
+    matched = [int(cp) for cp in task["matched"]]
+    split_threshold = int(task["split_threshold"])
+    eval_chars_per_font = int(task["eval_chars_per_font"])
+    seed = int(task["seed"])
+    resolution = int(task["resolution"])
+    dry_run = bool(task["dry_run"])
+    resume = bool(task["resume"])
+    train_root = Path(task["train_root"])
+    test_root = Path(task["test_root"])
+
+    source_specs = build_source_specs_from_paths(source_font_paths, resolution, dry_run)
+    shard_specs = split_into_shards(matched, split_threshold)
+    codepoint_to_global_idx = {cp: idx for idx, cp in enumerate(matched)}
+
+    entry = {
+        "font_index": font_index,
+        "region": region,
+        "subgroup": subgroup,
+        "kana_only": kana_only,
+        "font_name": font_name,
+        "target_font": str(target_font_path),
+        "source_fonts": [str(spec.path) for spec in source_specs],
+        "matched_count": len(matched),
+        "split_threshold": split_threshold,
+        "shards": [],
+    }
+
+    eval_count = min(eval_chars_per_font, len(matched))
+    eval_candidates = random.Random(seed + font_index).sample(matched, eval_count)
+    total_train_samples = 0
+    total_test_samples = 0
+
+    if not dry_run:
+        target_renderer = GlyphRenderer(str(target_font_path), resolution)
+
+    for shard_idx, (start, end, shard_label) in enumerate(shard_specs, start=1):
+        shard_codepoints = matched[start:end]
+        shard_suffix = "" if shard_label == "full" else f"_{shard_label}"
+        subgroup_prefix = f"{subgroup}_" if subgroup else ""
+        folder_name = f"{font_index:03d}_{region}_{subgroup_prefix}{target_font_path.stem}{shard_suffix}"
+        written = 0
+        failed = 0
+        shard_chars = []
+
+        if not dry_run:
+            shard_dir = train_root / folder_name
+            metadata_path = shard_dir / "metadata.json"
+            expected_count = len(shard_codepoints)
+            if resume:
+                completed, written, failed = shard_is_complete(metadata_path, expected_count)
+                if completed:
+                    total_train_samples += written
+                    entry["shards"].append(
+                        {
+                            "folder": folder_name,
+                            "shard_label": shard_label,
+                            "start": start,
+                            "end": end,
+                            "planned_count": expected_count,
+                            "written_count": written,
+                            "failed_count": failed,
+                        }
+                    )
+                    continue
+                if shard_dir.exists():
+                    shutil.rmtree(shard_dir)
+
+            shard_dir.mkdir(parents=True, exist_ok=True)
+            for cp in shard_codepoints:
+                refs = pick_refs(matched, cp, seed + font_index)
+                filename = filename_for_entry(codepoint_to_global_idx[cp], cp)
+                ok, source_font_name = write_composite(
+                    source_specs=source_specs,
+                    target_renderer=target_renderer,
+                    codepoint=cp,
+                    refs=refs,
+                    output_path=shard_dir / filename,
+                )
+                if not ok:
+                    failed += 1
+                    continue
+                written += 1
+                shard_chars.append(
+                    {
+                        "codepoint": format_codepoint(cp),
+                        "character": chr(cp),
+                        "filename": filename,
+                        "source_font": source_font_name,
+                        "global_char_index": codepoint_to_global_idx[cp],
+                        "reference_codepoints_1": [format_codepoint(r) for r in refs[:4]],
+                        "reference_codepoints_2": [format_codepoint(r) for r in refs[4:]],
+                    }
+                )
+            save_json(
+                metadata_path,
+                {
+                    "created_at": datetime.now().isoformat(),
+                    "dataset_type": "train",
+                    "font_index": font_index,
+                    "region": region,
+                    "subgroup": subgroup,
+                    "kana_only": kana_only,
+                    "font_name": font_name,
+                    "target_font": str(target_font_path),
+                    "source_fonts": [str(spec.path) for spec in source_specs],
+                    "matched_count": len(matched),
+                    "shard_label": shard_label,
+                    "shard_index": shard_idx,
+                    "shard_count": len(shard_specs),
+                    "shard_start": start,
+                    "shard_end": end,
+                    "written_count": written,
+                    "failed_count": failed,
+                    "characters": shard_chars,
+                },
+            )
+        else:
+            written = len(shard_codepoints)
+
+        total_train_samples += written
+        entry["shards"].append(
+            {
+                "folder": folder_name,
+                "shard_label": shard_label,
+                "start": start,
+                "end": end,
+                "planned_count": len(shard_codepoints),
+                "written_count": written,
+                "failed_count": failed,
+            }
+        )
+
+    subgroup_prefix = f"{subgroup}_" if subgroup else ""
+    eval_folder_name = f"{font_index:03d}_{region}_{subgroup_prefix}{target_font_path.stem}_eval"
+    eval_written = 0
+    eval_failed = 0
+    eval_chars = []
+    if not dry_run:
+        eval_dir = test_root / eval_folder_name
+        metadata_path = eval_dir / "metadata.json"
+        expected_count = len(eval_candidates)
+        if resume:
+            completed, eval_written, eval_failed = shard_is_complete(metadata_path, expected_count)
+            if not completed and eval_dir.exists():
+                shutil.rmtree(eval_dir)
+        else:
+            completed = False
+
+        if completed:
+            total_test_samples += eval_written
+        else:
+            eval_dir.mkdir(parents=True, exist_ok=True)
+            for cp in eval_candidates:
+                refs = pick_refs(matched, cp, seed + 100000 + font_index)
+                filename = filename_for_entry(codepoint_to_global_idx[cp], cp)
+                ok, source_font_name = write_composite(
+                    source_specs=source_specs,
+                    target_renderer=target_renderer,
+                    codepoint=cp,
+                    refs=refs,
+                    output_path=eval_dir / filename,
+                )
+                if not ok:
+                    eval_failed += 1
+                    continue
+                eval_written += 1
+                eval_chars.append(
+                    {
+                        "codepoint": format_codepoint(cp),
+                        "character": chr(cp),
+                        "filename": filename,
+                        "source_font": source_font_name,
+                        "global_char_index": codepoint_to_global_idx[cp],
+                        "reference_codepoints_1": [format_codepoint(r) for r in refs[:4]],
+                        "reference_codepoints_2": [format_codepoint(r) for r in refs[4:]],
+                    }
+                )
+            save_json(
+                metadata_path,
+                {
+                    "created_at": datetime.now().isoformat(),
+                    "dataset_type": "test_seen_preview",
+                    "font_index": font_index,
+                    "region": region,
+                    "subgroup": subgroup,
+                    "kana_only": kana_only,
+                    "font_name": font_name,
+                    "target_font": str(target_font_path),
+                    "source_fonts": [str(spec.path) for spec in source_specs],
+                    "matched_count": len(matched),
+                    "requested_eval_count": eval_count,
+                    "written_count": eval_written,
+                    "failed_count": eval_failed,
+                    "note": "Preview/evaluation subset sampled from training characters so all supported characters remain in train.",
+                    "characters": eval_chars,
+                },
+            )
+            total_test_samples += eval_written
+    else:
+        eval_written = eval_count
+        total_test_samples += eval_written
+
+    entry["eval_preview"] = {
+        "folder": eval_folder_name,
+        "requested_count": eval_count,
+        "written_count": eval_written,
+        "failed_count": eval_failed,
+    }
+
+    shard_msg = " + ".join(str(item["planned_count"]) for item in entry["shards"])
+    scope = "kana-only" if kana_only else "full"
+    summary = (
+        f"[{font_index:03d}] {region}/{target_font_path.name}: matched={len(matched)} "
+        f"train_shards={shard_msg} eval={eval_written} scope={scope}"
+    )
+    return {
+        "font_index": font_index,
+        "entry": entry,
+        "train_samples": total_train_samples,
+        "test_samples": total_test_samples,
+        "summary": summary,
+    }
+
+
 def main() -> None:
     args = parse_args()
 
@@ -256,6 +494,7 @@ def main() -> None:
     max_num_chars = 0
     total_train_samples = 0
     total_test_samples = 0
+    font_tasks: list[dict] = []
 
     if args.regions.strip():
         requested_regions = [item.strip().upper() for item in args.regions.split(",") if item.strip()]
@@ -302,225 +541,57 @@ def main() -> None:
                 continue
 
             max_num_chars = max(max_num_chars, len(matched))
-            shard_specs = split_into_shards(matched, args.split_threshold)
-            codepoint_to_global_idx = {cp: idx for idx, cp in enumerate(matched)}
-
-            entry = {
-                "font_index": font_index,
-                "region": region,
-                "subgroup": target_entry.subgroup,
-                "kana_only": target_entry.kana_only,
-                "font_name": font_name,
-                "target_font": str(target_font_path),
-                "source_fonts": [str(spec.path) for spec in source_specs],
-                "matched_count": len(matched),
-                "split_threshold": args.split_threshold,
-                "shards": [],
-            }
-
-            eval_count = min(args.eval_chars_per_font, len(matched))
-            eval_candidates = random.Random(args.seed + font_index).sample(matched, eval_count)
-            if not args.dry_run:
-                target_renderer = GlyphRenderer(str(target_font_path), args.resolution)
-
-            for shard_idx, (start, end, shard_label) in enumerate(shard_specs, start=1):
-                shard_codepoints = matched[start:end]
-                shard_suffix = "" if shard_label == "full" else f"_{shard_label}"
-                subgroup_prefix = f"{target_entry.subgroup}_" if target_entry.subgroup else ""
-                folder_name = f"{font_index:03d}_{region}_{subgroup_prefix}{target_font_path.stem}{shard_suffix}"
-                written = 0
-                failed = 0
-                shard_chars = []
-
-                if not args.dry_run:
-                    shard_dir = train_root / folder_name
-                    metadata_path = shard_dir / "metadata.json"
-                    expected_count = len(shard_codepoints)
-                    if args.resume:
-                        completed, written, failed = shard_is_complete(metadata_path, expected_count)
-                        if completed:
-                            print(f"[resume] skip completed train shard: {folder_name}")
-                            total_train_samples += written
-                            entry["shards"].append(
-                                {
-                                    "folder": folder_name,
-                                    "shard_label": shard_label,
-                                    "start": start,
-                                    "end": end,
-                                    "planned_count": expected_count,
-                                    "written_count": written,
-                                    "failed_count": failed,
-                                }
-                            )
-                            continue
-                        if shard_dir.exists():
-                            shutil.rmtree(shard_dir)
-
-                    shard_dir.mkdir(parents=True, exist_ok=True)
-                    for cp in shard_codepoints:
-                        refs = pick_refs(matched, cp, args.seed + font_index)
-                        filename = filename_for_entry(codepoint_to_global_idx[cp], cp)
-                        ok, source_font_name = write_composite(
-                            source_specs=source_specs,
-                            target_renderer=target_renderer,
-                            codepoint=cp,
-                            refs=refs,
-                            output_path=shard_dir / filename,
-                        )
-                        if not ok:
-                            failed += 1
-                            continue
-                        written += 1
-                        shard_chars.append(
-                            {
-                                "codepoint": format_codepoint(cp),
-                                "character": chr(cp),
-                                "filename": filename,
-                                "source_font": source_font_name,
-                                "global_char_index": codepoint_to_global_idx[cp],
-                                "reference_codepoints_1": [format_codepoint(r) for r in refs[:4]],
-                                "reference_codepoints_2": [format_codepoint(r) for r in refs[4:]],
-                            }
-                        )
-                    save_json(
-                        metadata_path,
-                        {
-                            "created_at": datetime.now().isoformat(),
-                            "dataset_type": "train",
-                            "font_index": font_index,
-                            "region": region,
-                            "subgroup": target_entry.subgroup,
-                            "kana_only": target_entry.kana_only,
-                            "font_name": font_name,
-                            "target_font": str(target_font_path),
-                            "source_fonts": [str(spec.path) for spec in source_specs],
-                            "matched_count": len(matched),
-                            "shard_label": shard_label,
-                            "shard_index": shard_idx,
-                            "shard_count": len(shard_specs),
-                            "shard_start": start,
-                            "shard_end": end,
-                            "written_count": written,
-                            "failed_count": failed,
-                            "characters": shard_chars,
-                        },
-                    )
-                else:
-                    written = len(shard_codepoints)
-
-                total_train_samples += written
-                entry["shards"].append(
-                    {
-                        "folder": folder_name,
-                        "shard_label": shard_label,
-                        "start": start,
-                        "end": end,
-                        "planned_count": len(shard_codepoints),
-                        "written_count": written,
-                        "failed_count": failed,
-                    }
-                )
-
-            subgroup_prefix = f"{target_entry.subgroup}_" if target_entry.subgroup else ""
-            eval_folder_name = f"{font_index:03d}_{region}_{subgroup_prefix}{target_font_path.stem}_eval"
-            eval_written = 0
-            eval_failed = 0
-            eval_chars = []
-            if not args.dry_run:
-                eval_dir = test_root / eval_folder_name
-                metadata_path = eval_dir / "metadata.json"
-                expected_count = len(eval_candidates)
-                if args.resume:
-                    completed, eval_written, eval_failed = shard_is_complete(metadata_path, expected_count)
-                    if completed:
-                        print(f"[resume] skip completed eval preview: {eval_folder_name}")
-                        total_test_samples += eval_written
-                        entry["eval_preview"] = {
-                            "folder": eval_folder_name,
-                            "requested_count": eval_count,
-                            "written_count": eval_written,
-                            "failed_count": eval_failed,
-                        }
-                        font_entries.append(entry)
-                        shard_msg = " + ".join(str(item["planned_count"]) for item in entry["shards"])
-                        scope = "kana-only" if target_entry.kana_only else "full"
-                        print(
-                            f"[{font_index:03d}] {region}/{target_font_path.name}: matched={len(matched)} "
-                            f"train_shards={shard_msg} eval={eval_written} scope={scope}"
-                        )
-                        font_index += 1
-                        continue
-                    if eval_dir.exists():
-                        shutil.rmtree(eval_dir)
-
-                eval_dir.mkdir(parents=True, exist_ok=True)
-                for cp in eval_candidates:
-                    refs = pick_refs(matched, cp, args.seed + 100000 + font_index)
-                    filename = filename_for_entry(codepoint_to_global_idx[cp], cp)
-                    ok, source_font_name = write_composite(
-                        source_specs=source_specs,
-                        target_renderer=target_renderer,
-                        codepoint=cp,
-                        refs=refs,
-                        output_path=eval_dir / filename,
-                    )
-                    if not ok:
-                        eval_failed += 1
-                        continue
-                    eval_written += 1
-                    eval_chars.append(
-                        {
-                            "codepoint": format_codepoint(cp),
-                            "character": chr(cp),
-                            "filename": filename,
-                            "source_font": source_font_name,
-                            "global_char_index": codepoint_to_global_idx[cp],
-                            "reference_codepoints_1": [format_codepoint(r) for r in refs[:4]],
-                            "reference_codepoints_2": [format_codepoint(r) for r in refs[4:]],
-                        }
-                    )
-                save_json(
-                    metadata_path,
-                    {
-                        "created_at": datetime.now().isoformat(),
-                        "dataset_type": "test_seen_preview",
-                        "font_index": font_index,
-                        "region": region,
-                        "subgroup": target_entry.subgroup,
-                        "kana_only": target_entry.kana_only,
-                        "font_name": font_name,
-                        "target_font": str(target_font_path),
-                        "source_fonts": [str(spec.path) for spec in source_specs],
-                        "matched_count": len(matched),
-                        "requested_eval_count": eval_count,
-                        "written_count": eval_written,
-                        "failed_count": eval_failed,
-                        "note": "Preview/evaluation subset sampled from training characters so all supported characters remain in train.",
-                        "characters": eval_chars,
-                    },
-                )
-            else:
-                eval_written = eval_count
-
-            total_test_samples += eval_written
-            entry["eval_preview"] = {
-                "folder": eval_folder_name,
-                "requested_count": eval_count,
-                "written_count": eval_written,
-                "failed_count": eval_failed,
-            }
-            font_entries.append(entry)
-
-            shard_msg = " + ".join(str(item["planned_count"]) for item in entry["shards"])
-            scope = "kana-only" if target_entry.kana_only else "full"
-            print(
-                f"[{font_index:03d}] {region}/{target_font_path.name}: matched={len(matched)} "
-                f"train_shards={shard_msg} eval={eval_written} scope={scope}"
+            font_tasks.append(
+                {
+                    "region": region,
+                    "font_index": font_index,
+                    "subgroup": target_entry.subgroup,
+                    "kana_only": target_entry.kana_only,
+                    "font_name": font_name,
+                    "target_font": str(target_font_path),
+                    "source_fonts": [str(spec.path) for spec in source_specs],
+                    "matched": matched,
+                    "split_threshold": args.split_threshold,
+                    "eval_chars_per_font": args.eval_chars_per_font,
+                    "seed": args.seed,
+                    "resolution": args.resolution,
+                    "dry_run": args.dry_run,
+                    "resume": args.resume,
+                    "train_root": str(train_root),
+                    "test_root": str(test_root),
+                }
             )
             font_index += 1
 
-    if not font_entries:
+    if args.workers < 1:
+        raise ValueError("--workers must be >= 1")
+
+    if not font_tasks:
         raise RuntimeError("No usable fonts were prepared.")
+
+    worker_count = min(args.workers, len(font_tasks))
+    if worker_count > 1:
+        print(f"\nUsing {worker_count} worker processes for dataset generation.")
+
+    task_results: list[dict] = []
+    if worker_count == 1:
+        for task in font_tasks:
+            result = process_font_task(task)
+            task_results.append(result)
+            print(result["summary"])
+    else:
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            futures = [executor.submit(process_font_task, task) for task in font_tasks]
+            for future in as_completed(futures):
+                result = future.result()
+                task_results.append(result)
+                print(result["summary"])
+
+    task_results.sort(key=lambda item: item["font_index"])
+    for result in task_results:
+        font_entries.append(result["entry"])
+        total_train_samples += int(result["train_samples"])
+        total_test_samples += int(result["test_samples"])
 
     manifest = {
         "created_at": datetime.now().isoformat(),
