@@ -168,10 +168,26 @@ def list_target_font_entries(region_dir: Path, region: str) -> list[TargetFontEn
 
 
 def split_into_shards(codepoints: list[int], split_threshold: int) -> list[tuple[int, int, str]]:
-    if len(codepoints) > split_threshold:
-        midpoint = len(codepoints) // 2
-        return [(0, midpoint, "part1"), (midpoint, len(codepoints), "part2")]
-    return [(0, len(codepoints), "full")]
+    total = len(codepoints)
+    if total <= split_threshold:
+        return [(0, total, "full")]
+
+    leaves: list[tuple[int, int]] = []
+
+    def split_range(start: int, end: int) -> None:
+        count = end - start
+        if count <= split_threshold:
+            leaves.append((start, end))
+            return
+        midpoint = start + count // 2
+        split_range(start, midpoint)
+        split_range(midpoint, end)
+
+    split_range(0, total)
+    return [
+        (start, end, f"part{idx:03d}")
+        for idx, (start, end) in enumerate(leaves, start=1)
+    ]
 
 
 def write_composite(
