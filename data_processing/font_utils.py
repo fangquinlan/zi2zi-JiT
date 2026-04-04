@@ -107,6 +107,14 @@ def get_cjk_codepoints(font: TTFont, filter_empty: bool = True) -> Set[int]:
     return cjk_codepoints
 
 
+def get_renderable_codepoints(font: TTFont, filter_empty: bool = True) -> Set[int]:
+    cmap = font.getBestCmap() or {}
+    codepoints = set(cmap.keys())
+    if filter_empty:
+        codepoints = {cp for cp in codepoints if has_valid_outline(font, cp)}
+    return codepoints
+
+
 def extract_font_name(font: TTFont, fallback_path: Path) -> str:
     name_table = font.get("name")
     if not name_table:
@@ -227,7 +235,24 @@ class GlyphRenderer:
         try:
             image = Image.new("RGB", (self.resolution, self.resolution), self.background_color)
             draw = ImageDraw.Draw(image)
-            draw.text(self._global_offset, chr(codepoint), font=self.pil_font, fill=self.text_color)
+            char = chr(codepoint)
+            try:
+                bbox = draw.textbbox((0, 0), char, font=self.pil_font)
+            except Exception:
+                bbox = None
+            if bbox is not None:
+                text_w = bbox[2] - bbox[0]
+                text_h = bbox[3] - bbox[1]
+                if text_w > 0 and text_h > 0:
+                    offset = (
+                        (self.resolution - text_w) // 2 - bbox[0],
+                        (self.resolution - text_h) // 2 - bbox[1],
+                    )
+                else:
+                    offset = self._global_offset
+            else:
+                offset = self._global_offset
+            draw.text(offset, char, font=self.pil_font, fill=self.text_color)
             return image
         except Exception:
             return None
