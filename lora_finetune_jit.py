@@ -246,8 +246,9 @@ def main(args):
         train_one_epoch(model, model_without_ddp, data_loader_train, optimizer, device, epoch, log_writer=log_writer,
                         args=args)
 
-        should_update_latest = epoch > 0 and (
-            epoch % args.save_last_freq == 0 or (max_epochs is not None and epoch + 1 == max_epochs)
+        completed_epoch = epoch + 1
+        should_update_latest = (
+            completed_epoch % args.save_last_freq == 0 or (max_epochs is not None and completed_epoch == max_epochs)
         )
         if should_update_latest:
             save_named_model_no_ema(
@@ -264,7 +265,9 @@ def main(args):
                 epoch_name="last"
             )
 
-        if args.online_eval and epoch > 0 and (epoch % args.eval_freq == 0 or (max_epochs is not None and epoch + 1 == max_epochs)):
+        if args.online_eval and (
+            completed_epoch % args.eval_freq == 0 or (max_epochs is not None and completed_epoch == max_epochs)
+        ):
             torch.cuda.empty_cache()
             with torch.no_grad():
                 metrics = evaluate(model_without_ddp, args, epoch, batch_size=args.gen_bsz, log_writer=log_writer)
