@@ -165,6 +165,27 @@ python lora_single_gpu_finetune_jit.py \
 
 如果显存更充足、并且希望在微调时让 content encoder 一起适配，可以额外加上 `--train_content_encoder`。这样训练模式会从纯 LoRA 更新切换为 `LoRA + content encoder`，显存占用也会相应增加。
 
+### 全参数继续预训练
+
+如果你的目标不是“适配一种新风格”，而是让底模本身吸收更多生僻结构和大量未见部件组合，推荐使用全参数继续预训练，而不是 LoRA。
+
+对于用 `prepare_sourcehan_font_training_dataset.py` 准备好的全量 Source Han 配对数据，可以直接这样在单卡上启动 JiT-L/16 的继续预训练：
+
+```bash
+python scripts/start_large_continue_pretrain.py \
+    --dataset-dir  data/sourcehan_font_training_dataset \
+    --output-dir   run/continue_pretrain_large_sourcehan \
+    --batch-size   32 \
+    --gen-bsz      16
+```
+
+说明：
+
+- 这条路径训练的是完整模型参数，不是 LoRA 适配器。
+- `scripts/start_large_continue_pretrain.py` 默认就是 `--infinite`，会一直训练直到你手动停止。
+- 输出目录里会持续维护 `checkpoint-latest.pth`、`checkpoint-last.pth` 和 `checkpoint-best.pth`。
+- 默认每个完整 epoch 都会保存一次并生成一次验证图，适合单个 epoch 很长的大规模字库训练。
+
 ### 生成
 
 从微调后的 checkpoint 生成字符：

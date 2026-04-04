@@ -169,6 +169,27 @@ python lora_single_gpu_finetune_jit.py \
 
 If you have more VRAM and want to let the content encoder adapt during fine-tuning, add `--train_content_encoder`. This changes the trainable set from pure LoRA weights to `LoRA + content encoder`, so VRAM usage will increase accordingly.
 
+### Full-Model Continued Pretraining
+
+If you need the base model itself to absorb a much larger structural vocabulary, use full-model continued pretraining instead of LoRA. This is the recommended path when adapting JiT-L/16 to large rare-character corpora or many unseen component combinations.
+
+For the full-font Source Han style dataset prepared by `prepare_sourcehan_font_training_dataset.py`, you can launch a single-GPU continued pretraining run like this:
+
+```bash
+python scripts/start_large_continue_pretrain.py \
+    --dataset-dir  data/sourcehan_font_training_dataset \
+    --output-dir   run/continue_pretrain_large_sourcehan \
+    --batch-size   32 \
+    --gen-bsz      16
+```
+
+Notes:
+
+- This path trains the full model, not LoRA adapters.
+- `scripts/start_large_continue_pretrain.py` defaults to `--infinite`, so training will keep running until you stop it manually.
+- `checkpoint-latest.pth`, `checkpoint-last.pth`, and `checkpoint-best.pth` are maintained in the output directory.
+- By default it evaluates and saves once per completed epoch, which is useful when each epoch is very large.
+
 ### Generation
 
 Generate characters from a fine-tuned checkpoint:

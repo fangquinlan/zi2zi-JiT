@@ -252,7 +252,7 @@ def add_weight_decay(model, weight_decay=0, skip_list=()):
         {'params': decay, 'weight_decay': weight_decay}]
 
 
-def save_model(args, model_without_ddp, optimizer, epoch, epoch_name=None):
+def save_model(args, model_without_ddp, optimizer, epoch, epoch_name=None, extra_state=None):
     if epoch_name is None:
         epoch_name = str(epoch)
     output_dir = Path(args.output_dir)
@@ -264,6 +264,8 @@ def save_model(args, model_without_ddp, optimizer, epoch, epoch_name=None):
         'epoch': epoch,
         'args': args,
     }
+    if extra_state:
+        to_save.update(extra_state)
 
     # ema
     ema_state_dict1 = copy.deepcopy(model_without_ddp.state_dict())

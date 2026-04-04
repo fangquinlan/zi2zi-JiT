@@ -19,10 +19,10 @@ from util.unicode_labels import (
     parse_unicode_codepoint_from_name,
 )
 from util.ids_utils import build_ids_resources
-from util.lora_utils import load_state_dict_with_font_embedding_resize
+from util.lora_utils import load_state_dict_with_font_embedding_resize, resolve_checkpoint_path
 
 import copy
-from engine_jit import train_one_epoch, evaluate
+from engine_jit import train_one_epoch, evaluate, train_one_epoch_single_gpu, evaluate_single_gpu
 
 from denoiser import Denoiser
 
@@ -288,8 +288,12 @@ def get_args_parser():
     # checkpointing
     parser.add_argument('--output_dir', default='./output_dir',
                         help='Directory to save outputs (empty for no saving)')
+    parser.add_argument('--base_checkpoint', default='',
+                        help='Path to a pretrained checkpoint (file or folder) used to initialize the full model.')
     parser.add_argument('--resume', default='',
                         help='Folder that contains checkpoint to resume from')
+    parser.add_argument('--infinite', action='store_true',
+                        help='Train indefinitely until manually stopped.')
     parser.add_argument('--save_last_freq', type=int, default=5,
                         help='Frequency (in epochs) to save checkpoints')
     parser.add_argument('--log_freq', default=100, type=int)
@@ -320,6 +324,11 @@ def main(args):
     np.random.seed(seed)
 
     cudnn.benchmark = True
+    torch.set_float32_matmul_precision("high")
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        print("TF32 enabled for float32 matmul and cuDNN.")
 
     num_tasks = misc.get_world_size()
     global_rank = misc.get_rank()
@@ -400,6 +409,22 @@ def main(args):
                 "Those characters will receive a zero IDS embedding."
             )
 
+    base_ckpt_path = resolve_checkpoint_path(args.base_checkpoint) if args.base_checkpoint else None
+    if args.resume and args.base_checkpoint:
+        print("Both --resume and --base_checkpoint provided; ignoring --base_checkpoint.")
+        base_ckpt_path = None
+    if base_ckpt_path:
+        if not os.path.exists(base_ckpt_path):
+            raise FileNotFoundError(f"Base checkpoint not found: {base_ckpt_path}")
+        checkpoint = torch.load(base_ckpt_path, map_location='cpu', weights_only=False)
+        base_state_dict = checkpoint['model'] if isinstance(checkpoint, dict) and 'model' in checkpoint else checkpoint
+        load_messages = load_state_dict_with_font_embedding_resize(model, base_state_dict, strict=True)
+        for message in load_messages:
+            print(message)
+        model.refresh_semantic_consistency_encoder_from_content()
+        print("Loaded base checkpoint from", base_ckpt_path)
+        del checkpoint
+
     print("Model =", model)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print("Number of trainable parameters: {:.6f}M".format(n_params / 1e6))
@@ -414,16 +439,19 @@ def main(args):
     print("Actual lr: {:.2e}".format(args.lr))
     print("Effective batch size: %d" % eff_batch_size)
 
-    model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
-    model_without_ddp = model.module
+    if args.distributed:
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
+        model_without_ddp = model.module
+    else:
+        model_without_ddp = model
 
     # Set up optimizer with weight decay adjustment for bias and norm layers
     param_groups = misc.add_weight_decay(model_without_ddp, args.weight_decay)
     optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
     print(optimizer)
 
-    # Resume from checkpoint if provided
-    checkpoint_path = os.path.join(args.resume, "checkpoint-last.pth") if args.resume else None
+    best_fid = float("inf")
+    checkpoint_path = resolve_checkpoint_path(args.resume) if args.resume else None
     if checkpoint_path and os.path.exists(checkpoint_path):
         checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         load_messages = load_state_dict_with_font_embedding_resize(model_without_ddp, checkpoint['model'], strict=True)
@@ -431,21 +459,31 @@ def main(args):
             print(message)
         model_without_ddp.refresh_semantic_consistency_encoder_from_content()
 
-        ema_state_dict1 = checkpoint['model_ema1']
-        ema_state_dict2 = checkpoint['model_ema2']
-        model_without_ddp.ema_params1 = [ema_state_dict1[name].cuda() for name, _ in model_without_ddp.named_parameters()]
-        model_without_ddp.ema_params2 = [ema_state_dict2[name].cuda() for name, _ in model_without_ddp.named_parameters()]
-        print("Resumed checkpoint from", args.resume)
-
+        if 'model_ema1' in checkpoint and 'model_ema2' in checkpoint:
+            ema_state_dict1 = checkpoint['model_ema1']
+            ema_state_dict2 = checkpoint['model_ema2']
+            model_without_ddp.ema_params1 = [ema_state_dict1[name].to(device=device) for name, _ in model_without_ddp.named_parameters()]
+            model_without_ddp.ema_params2 = [ema_state_dict2[name].to(device=device) for name, _ in model_without_ddp.named_parameters()]
+        else:
+            model_without_ddp.ema_params1 = copy.deepcopy(list(model_without_ddp.parameters()))
+            model_without_ddp.ema_params2 = copy.deepcopy(list(model_without_ddp.parameters()))
         if 'optimizer' in checkpoint and 'epoch' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer'])
             args.start_epoch = checkpoint['epoch'] + 1
-            print("Loaded optimizer & scaler state!")
+            print("Loaded optimizer state.")
+        if 'best_fid' in checkpoint:
+            best_fid = float(checkpoint['best_fid'])
+        print("Resumed checkpoint from", checkpoint_path)
         del checkpoint
     else:
         model_without_ddp.ema_params1 = copy.deepcopy(list(model_without_ddp.parameters()))
         model_without_ddp.ema_params2 = copy.deepcopy(list(model_without_ddp.parameters()))
-        print("Training from scratch")
+        if args.resume:
+            print("Warning: resume path not found, training from scratch.")
+        elif base_ckpt_path:
+            print("Training from base checkpoint.")
+        else:
+            print("Training from scratch")
 
     # Evaluate generation
     if args.evaluate_gen:
@@ -453,27 +491,48 @@ def main(args):
         with torch.random.fork_rng():
             torch.manual_seed(seed)
             with torch.no_grad():
-                evaluate(model_without_ddp, args, 0, batch_size=args.gen_bsz, log_writer=log_writer)
+                eval_fn = evaluate if args.distributed else evaluate_single_gpu
+                eval_fn(model_without_ddp, args, 0, batch_size=args.gen_bsz, log_writer=log_writer)
         return
 
     # Training loop
-    print(f"Start training for {args.epochs} epochs")
+    max_epochs = None if args.infinite or args.epochs <= 0 else args.epochs
+    train_target_desc = "infinite training" if max_epochs is None else f"{max_epochs} epochs"
+    print(f"Start training for {train_target_desc}")
     start_time = time.time()
-    for epoch in range(args.start_epoch, args.epochs):
+    epoch = args.start_epoch
+    train_fn = train_one_epoch if args.distributed else train_one_epoch_single_gpu
+    eval_fn = evaluate if args.distributed else evaluate_single_gpu
+    while True:
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
 
-        train_one_epoch(model, model_without_ddp, data_loader_train, optimizer, device, epoch, log_writer=log_writer, args=args)
+        if args.distributed:
+            train_fn(model, model_without_ddp, data_loader_train, optimizer, device, epoch, log_writer=log_writer, args=args)
+        else:
+            train_fn(model_without_ddp, data_loader_train, optimizer, device, epoch, log_writer=log_writer, args=args)
 
         completed_epoch = epoch + 1
-        # Save checkpoint periodically
-        if completed_epoch % args.save_last_freq == 0 or completed_epoch == args.epochs:
+        should_update_latest = (
+            completed_epoch % args.save_last_freq == 0
+            or (max_epochs is not None and completed_epoch == max_epochs)
+        )
+        if should_update_latest:
             misc.save_model(
                 args=args,
                 model_without_ddp=model_without_ddp,
                 optimizer=optimizer,
                 epoch=epoch,
-                epoch_name="last"
+                epoch_name="latest",
+                extra_state={"best_fid": best_fid},
+            )
+            misc.save_model(
+                args=args,
+                model_without_ddp=model_without_ddp,
+                optimizer=optimizer,
+                epoch=epoch,
+                epoch_name="last",
+                extra_state={"best_fid": best_fid},
             )
 
         if completed_epoch % 100 == 0:
@@ -481,18 +540,37 @@ def main(args):
                 args=args,
                 model_without_ddp=model_without_ddp,
                 optimizer=optimizer,
-                epoch=epoch
+                epoch=epoch,
+                extra_state={"best_fid": best_fid},
             )
 
         # Perform online evaluation at specified intervals
-        if args.online_eval and (completed_epoch % args.eval_freq == 0 or completed_epoch == args.epochs):
+        if args.online_eval and (
+            completed_epoch % args.eval_freq == 0
+            or (max_epochs is not None and completed_epoch == max_epochs)
+        ):
             torch.cuda.empty_cache()
             with torch.no_grad():
-                evaluate(model_without_ddp, args, epoch, batch_size=args.gen_bsz, log_writer=log_writer)
+                metrics = eval_fn(model_without_ddp, args, epoch, batch_size=args.gen_bsz, log_writer=log_writer)
+            if metrics["fid"] < best_fid:
+                best_fid = float(metrics["fid"])
+                misc.save_model(
+                    args=args,
+                    model_without_ddp=model_without_ddp,
+                    optimizer=optimizer,
+                    epoch=epoch,
+                    epoch_name="best",
+                    extra_state={"best_fid": best_fid, "best_epoch": epoch},
+                )
+                print(f"Saved new best checkpoint at epoch {epoch} with FID {best_fid:.4f}")
             torch.cuda.empty_cache()
 
         if misc.is_main_process() and log_writer is not None:
             log_writer.flush()
+
+        if max_epochs is not None and completed_epoch >= max_epochs:
+            break
+        epoch += 1
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))

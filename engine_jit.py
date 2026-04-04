@@ -330,6 +330,7 @@ def train_one_epoch_single_gpu(model, data_loader, optimizer, device, epoch, log
         optimizer.step()
 
         torch.cuda.synchronize()
+        model.update_ema()
 
         metric_logger.update(loss=loss_value)
         lr = optimizer.param_groups[0]["lr"]
@@ -375,6 +376,16 @@ def evaluate_single_gpu(model, args, epoch, batch_size=64, log_writer=None):
     print("Save to:", base_folder)
     os.makedirs(save_folder, exist_ok=True)
     os.makedirs(gen_folder, exist_ok=True)
+
+    model_state_dict = None
+    if getattr(model, "ema_params1", None) is not None:
+        model_state_dict = copy.deepcopy(model.state_dict())
+        ema_state_dict = copy.deepcopy(model.state_dict())
+        for i, (name, _value) in enumerate(model.named_parameters()):
+            assert name in ema_state_dict
+            ema_state_dict[name] = model.ema_params1[i]
+        print("Switch to ema")
+        model.load_state_dict(ema_state_dict)
 
     for i in range(num_steps):
         print("Generation step {}/{}".format(i, num_steps))
@@ -437,6 +448,10 @@ def evaluate_single_gpu(model, args, epoch, batch_size=64, log_writer=None):
                 rows.append(row)
             grid_img = np.concatenate(rows, axis=0)
             cv2.imwrite(os.path.join(save_folder, 'grid_{}.png'.format(str(grid_id).zfill(5))), grid_img)
+
+    if model_state_dict is not None:
+        print("Switch back from ema")
+        model.load_state_dict(model_state_dict)
 
     fid_statistics_file = _resolve_fid_statistics_file(args.img_size)
     metrics_dict = torch_fidelity.calculate_metrics(
