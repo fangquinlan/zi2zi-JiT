@@ -71,6 +71,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--regions", default="", help="Optional comma-separated subset of regions, e.g. SC,TC,JP.")
     parser.add_argument("--limit-fonts-per-region", type=int, default=None, help="Optional debug limit per region.")
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--resume", action="store_true", help="Resume into an existing output directory and skip completed shards.")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -79,6 +80,11 @@ def save_json(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def load_json(path: Path) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
 def format_codepoint(codepoint: int) -> str:
@@ -110,12 +116,26 @@ def build_ref_grid(renderer: GlyphRenderer, ref_codepoints: list[int], cell_size
     return grid
 
 
-def ensure_clean_output(output_dir: Path, force: bool) -> None:
+def ensure_clean_output(output_dir: Path, force: bool, resume: bool) -> None:
     if output_dir.exists():
+        if resume:
+            (output_dir / "train").mkdir(parents=True, exist_ok=True)
+            (output_dir / "test").mkdir(parents=True, exist_ok=True)
+            return
         if not force:
             raise FileExistsError(f"Output directory already exists: {output_dir}. Use --force to replace it.")
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+
+def shard_is_complete(metadata_path: Path, expected_count: int) -> tuple[bool, int, int]:
+    if not metadata_path.is_file():
+        return False, 0, 0
+    metadata = load_json(metadata_path)
+    written_count = int(metadata.get("written_count", metadata.get("extracted_count", 0)))
+    failed_count = int(metadata.get("failed_count", 0))
+    processed_count = written_count + failed_count
+    return processed_count >= expected_count, written_count, failed_count
 
 
 def build_source_specs(input_root: Path, region: str, resolution: int, dry_run: bool) -> list[SourceFontSpec]:
@@ -223,7 +243,10 @@ def main() -> None:
     if not input_root.is_dir():
         raise FileNotFoundError(f"Input root not found: {input_root}")
 
-    ensure_clean_output(output_dir, force=args.force)
+    if args.force and args.resume:
+        raise ValueError("--force and --resume cannot be used together.")
+
+    ensure_clean_output(output_dir, force=args.force, resume=args.resume)
 
     if args.eval_chars_per_font < 1:
         raise ValueError("--eval-chars-per-font must be >= 1")
@@ -311,6 +334,28 @@ def main() -> None:
 
                 if not args.dry_run:
                     shard_dir = train_root / folder_name
+                    metadata_path = shard_dir / "metadata.json"
+                    expected_count = len(shard_codepoints)
+                    if args.resume:
+                        completed, written, failed = shard_is_complete(metadata_path, expected_count)
+                        if completed:
+                            print(f"[resume] skip completed train shard: {folder_name}")
+                            total_train_samples += written
+                            entry["shards"].append(
+                                {
+                                    "folder": folder_name,
+                                    "shard_label": shard_label,
+                                    "start": start,
+                                    "end": end,
+                                    "planned_count": expected_count,
+                                    "written_count": written,
+                                    "failed_count": failed,
+                                }
+                            )
+                            continue
+                        if shard_dir.exists():
+                            shutil.rmtree(shard_dir)
+
                     shard_dir.mkdir(parents=True, exist_ok=True)
                     for cp in shard_codepoints:
                         refs = pick_refs(matched, cp, args.seed + font_index)
@@ -338,7 +383,7 @@ def main() -> None:
                             }
                         )
                     save_json(
-                        shard_dir / "metadata.json",
+                        metadata_path,
                         {
                             "created_at": datetime.now().isoformat(),
                             "dataset_type": "train",
@@ -383,6 +428,31 @@ def main() -> None:
             eval_chars = []
             if not args.dry_run:
                 eval_dir = test_root / eval_folder_name
+                metadata_path = eval_dir / "metadata.json"
+                expected_count = len(eval_candidates)
+                if args.resume:
+                    completed, eval_written, eval_failed = shard_is_complete(metadata_path, expected_count)
+                    if completed:
+                        print(f"[resume] skip completed eval preview: {eval_folder_name}")
+                        total_test_samples += eval_written
+                        entry["eval_preview"] = {
+                            "folder": eval_folder_name,
+                            "requested_count": eval_count,
+                            "written_count": eval_written,
+                            "failed_count": eval_failed,
+                        }
+                        font_entries.append(entry)
+                        shard_msg = " + ".join(str(item["planned_count"]) for item in entry["shards"])
+                        scope = "kana-only" if target_entry.kana_only else "full"
+                        print(
+                            f"[{font_index:03d}] {region}/{target_font_path.name}: matched={len(matched)} "
+                            f"train_shards={shard_msg} eval={eval_written} scope={scope}"
+                        )
+                        font_index += 1
+                        continue
+                    if eval_dir.exists():
+                        shutil.rmtree(eval_dir)
+
                 eval_dir.mkdir(parents=True, exist_ok=True)
                 for cp in eval_candidates:
                     refs = pick_refs(matched, cp, args.seed + 100000 + font_index)
@@ -410,7 +480,7 @@ def main() -> None:
                         }
                     )
                 save_json(
-                    eval_dir / "metadata.json",
+                    metadata_path,
                     {
                         "created_at": datetime.now().isoformat(),
                         "dataset_type": "test_seen_preview",
