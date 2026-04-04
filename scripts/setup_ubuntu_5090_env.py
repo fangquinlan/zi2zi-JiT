@@ -140,6 +140,7 @@ def install_python_packages(
             "install",
             "numpy<2",
             "opencv-python==4.11.0.86",
+            "brotli",
             "timm==0.9.12",
             "tensorboard>=2.16,<2.21",
             "scipy>=1.11,<1.16",

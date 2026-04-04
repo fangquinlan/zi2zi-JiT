@@ -1,3 +1,5 @@
+import hashlib
+import tempfile
 from pathlib import Path
 from typing import Optional, Set, Tuple
 
@@ -5,7 +7,8 @@ from fontTools.ttLib import TTFont
 from PIL import Image, ImageDraw, ImageFont
 
 
-SUPPORTED_FONT_SUFFIXES = {".ttf", ".otf", ".TTF", ".OTF"}
+SUPPORTED_FONT_SUFFIXES = {".ttf", ".otf", ".woff", ".woff2", ".TTF", ".OTF", ".WOFF", ".WOFF2"}
+WEB_FONT_SUFFIXES = {".woff", ".woff2", ".WOFF", ".WOFF2"}
 
 CJK_RANGES = [
     (0x4E00, 0x9FFF),    # CJK Unified Ideographs
@@ -51,6 +54,37 @@ def load_font(font_path: str) -> Tuple[TTFont, Path]:
     validated_path = validate_font_file(font_path)
     font = TTFont(str(validated_path))
     return font, validated_path
+
+
+def _font_cache_dir() -> Path:
+    cache_dir = Path(tempfile.gettempdir()) / "zi2zi_jit_font_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def _font_cache_key(font_path: Path) -> str:
+    stat = font_path.stat()
+    payload = f"{font_path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def prepare_font_for_pil(font_path: str) -> Path:
+    validated_path = validate_font_file(font_path)
+    if validated_path.suffix not in WEB_FONT_SUFFIXES:
+        return validated_path
+
+    cache_dir = _font_cache_dir()
+    cache_key = _font_cache_key(validated_path)
+
+    font = TTFont(str(validated_path))
+    out_suffix = ".otf" if "CFF " in font else ".ttf"
+    cached_path = cache_dir / f"{validated_path.stem}-{cache_key}{out_suffix}"
+    if cached_path.exists():
+        return cached_path
+
+    font.flavor = None
+    font.save(str(cached_path))
+    return cached_path
 
 
 def is_cjk_codepoint(codepoint: int) -> bool:
@@ -162,7 +196,8 @@ class GlyphRenderer:
         self.sample_size = sample_size
 
         self.font_size = int(resolution * 0.8)
-        self.pil_font = ImageFont.truetype(str(font_path), self.font_size)
+        self.render_font_path = prepare_font_for_pil(font_path)
+        self.pil_font = ImageFont.truetype(str(self.render_font_path), self.font_size)
 
         self._tt_font = TTFont(str(font_path))
         self._cmap = self._tt_font.getBestCmap() or {}

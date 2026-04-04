@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare a full-font finetuning dataset from regional Source Han Serif pairs."""
+"""Prepare a full-font finetuning dataset from Source Han Sans + Plangothic source pairs."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import json
 import random
 import shutil
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -24,23 +25,42 @@ from data_processing.font_utils import (  # noqa: E402
     SUPPORTED_FONT_SUFFIXES,
     extract_font_name,
     get_renderable_codepoints,
+    is_kana_codepoint,
     load_font,
 )
 from data_processing.pipeline import create_combined_image, create_test_npz  # noqa: E402
 
 
 REGION_SOURCE_FONTS = {
-    "HK": "SourceHanSerifHK-Light.otf",
-    "JP": "SourceHanSerifJP-Light.otf",
-    "KR": "SourceHanSerifKR-Light.otf",
-    "SC": "SourceHanSerifSC-Light.otf",
-    "TC": "SourceHanSerifTC-Light.otf",
+    "HK": "SourceHanSansHK-Regular.otf",
+    "JP": "SourceHanSansJP-Regular.otf",
+    "KR": "SourceHanSansKR-Regular.otf",
+    "SC": "SourceHanSansSC-Regular.otf",
+    "TC": "SourceHanSansTC-Regular.otf",
 }
+SUPPLEMENT_SOURCE_FONTS = [
+    "PlangothicP1-Regular.ttf",
+    "PlangothicP2-Regular.ttf",
+]
+
+
+@dataclass
+class SourceFontSpec:
+    path: Path
+    codepoints: set[int]
+    renderer: GlyphRenderer | None = None
+
+
+@dataclass
+class TargetFontEntry:
+    path: Path
+    kana_only: bool = False
+    subgroup: str = ""
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Prepare a full-font finetuning dataset using regional Source Han Serif source fonts.",
+        description="Prepare a full-font finetuning dataset using Source Han Sans with Plangothic fallback coverage.",
     )
     parser.add_argument("--input-root", default="train/用于训练的字体数据")
     parser.add_argument("--output-dir", default="data/sourcehan_font_training_dataset")
@@ -98,11 +118,53 @@ def ensure_clean_output(output_dir: Path, force: bool) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
 
-def list_target_fonts(region_dir: Path) -> list[Path]:
-    return sorted(
-        [path for path in region_dir.iterdir() if path.is_file() and path.suffix in SUPPORTED_FONT_SUFFIXES],
-        key=lambda path: path.name.lower(),
-    )
+def build_source_specs(input_root: Path, region: str, resolution: int, dry_run: bool) -> list[SourceFontSpec]:
+    source_paths = [input_root / REGION_SOURCE_FONTS[region]]
+    source_paths.extend(input_root / name for name in SUPPLEMENT_SOURCE_FONTS)
+
+    specs: list[SourceFontSpec] = []
+    for path in source_paths:
+        if not path.is_file():
+            continue
+        font, _ = load_font(str(path))
+        spec = SourceFontSpec(
+            path=path,
+            codepoints=get_renderable_codepoints(font, filter_empty=True),
+            renderer=None if dry_run else GlyphRenderer(str(path), resolution),
+        )
+        specs.append(spec)
+    return specs
+
+
+def union_source_codepoints(source_specs: list[SourceFontSpec]) -> set[int]:
+    merged: set[int] = set()
+    for spec in source_specs:
+        merged.update(spec.codepoints)
+    return merged
+
+
+def resolve_source_spec(source_specs: list[SourceFontSpec], codepoint: int) -> SourceFontSpec | None:
+    for spec in source_specs:
+        if codepoint in spec.codepoints:
+            return spec
+    return None
+
+
+def list_target_font_entries(region_dir: Path, region: str) -> list[TargetFontEntry]:
+    entries = [
+        TargetFontEntry(path=path, kana_only=False, subgroup="")
+        for path in region_dir.iterdir()
+        if path.is_file() and path.suffix in SUPPORTED_FONT_SUFFIXES
+    ]
+    if region == "JP":
+        kana_dir = region_dir / "kana"
+        if kana_dir.is_dir():
+            entries.extend(
+                TargetFontEntry(path=path, kana_only=True, subgroup="kana")
+                for path in kana_dir.iterdir()
+                if path.is_file() and path.suffix in SUPPORTED_FONT_SUFFIXES
+            )
+    return sorted(entries, key=lambda item: (item.subgroup, item.path.name.lower()))
 
 
 def split_into_shards(codepoints: list[int], split_threshold: int) -> list[tuple[int, int, str]]:
@@ -114,21 +176,24 @@ def split_into_shards(codepoints: list[int], split_threshold: int) -> list[tuple
 
 def write_composite(
     *,
-    source_renderer: GlyphRenderer,
+    source_specs: list[SourceFontSpec],
     target_renderer: GlyphRenderer,
     codepoint: int,
     refs: list[int],
     output_path: Path,
-) -> bool:
-    source_img = source_renderer.render(codepoint)
+) -> tuple[bool, str | None]:
+    source_spec = resolve_source_spec(source_specs, codepoint)
+    if source_spec is None or source_spec.renderer is None:
+        return False, None
+    source_img = source_spec.renderer.render(codepoint)
     target_img = target_renderer.render(codepoint)
     ref_grid_1 = build_ref_grid(target_renderer, refs[:4])
     ref_grid_2 = build_ref_grid(target_renderer, refs[4:])
     if source_img is None or target_img is None or ref_grid_1 is None or ref_grid_2 is None:
-        return False
+        return False, None
     combined = create_combined_image(source_img, target_img, ref_grid_1, ref_grid_2)
     combined.save(output_path, "JPEG", quality=95)
-    return True
+    return True, source_spec.path.name
 
 
 def main() -> None:
@@ -166,29 +231,35 @@ def main() -> None:
 
     for region in region_dirs:
         region_dir = input_root / region
-        source_font_path = input_root / REGION_SOURCE_FONTS[region]
-        if not source_font_path.is_file():
-            raise FileNotFoundError(f"Missing regional source font for {region}: {source_font_path}")
-
-        source_font, _ = load_font(str(source_font_path))
-        source_codepoints = get_renderable_codepoints(source_font, filter_empty=True)
-        target_fonts = list_target_fonts(region_dir)
+        source_specs = build_source_specs(input_root, region, args.resolution, args.dry_run)
+        if not source_specs:
+            raise FileNotFoundError(f"No usable source fonts found for region {region} under {input_root}")
+        source_codepoints = union_source_codepoints(source_specs)
+        target_fonts = list_target_font_entries(region_dir, region)
         if args.limit_fonts_per_region is not None:
             target_fonts = target_fonts[:args.limit_fonts_per_region]
         if not target_fonts:
             print(f"[skip] region {region}: no target fonts found")
             continue
 
-        print(f"\n[{region}] source font: {source_font_path.name} ({len(source_codepoints)} renderable chars)")
+        print(
+            f"\n[{region}] source fonts: "
+            f"{', '.join(spec.path.name for spec in source_specs)} "
+            f"({len(source_codepoints)} combined renderable chars)"
+        )
 
-        for target_font_path in target_fonts:
+        for target_entry in target_fonts:
+            target_font_path = target_entry.path
             target_font, _ = load_font(str(target_font_path))
             target_codepoints = get_renderable_codepoints(target_font, filter_empty=True)
             matched = sorted(source_codepoints & target_codepoints)
+            if target_entry.kana_only:
+                matched = [cp for cp in matched if is_kana_codepoint(cp)]
             font_name = extract_font_name(target_font, target_font_path)
 
             if len(matched) < 9:
-                print(f"[skip] {region}/{target_font_path.name}: matched={len(matched)} (<9)")
+                scope = "kana-only" if target_entry.kana_only else "full"
+                print(f"[skip] {region}/{target_font_path.name}: matched={len(matched)} (<9, scope={scope})")
                 continue
 
             max_num_chars = max(max_num_chars, len(matched))
@@ -198,9 +269,11 @@ def main() -> None:
             entry = {
                 "font_index": font_index,
                 "region": region,
+                "subgroup": target_entry.subgroup,
+                "kana_only": target_entry.kana_only,
                 "font_name": font_name,
                 "target_font": str(target_font_path),
-                "source_font": str(source_font_path),
+                "source_fonts": [str(spec.path) for spec in source_specs],
                 "matched_count": len(matched),
                 "split_threshold": args.split_threshold,
                 "shards": [],
@@ -209,13 +282,13 @@ def main() -> None:
             eval_count = min(args.eval_chars_per_font, len(matched))
             eval_candidates = random.Random(args.seed + font_index).sample(matched, eval_count)
             if not args.dry_run:
-                source_renderer = GlyphRenderer(str(source_font_path), args.resolution)
                 target_renderer = GlyphRenderer(str(target_font_path), args.resolution)
 
             for shard_idx, (start, end, shard_label) in enumerate(shard_specs, start=1):
                 shard_codepoints = matched[start:end]
                 shard_suffix = "" if shard_label == "full" else f"_{shard_label}"
-                folder_name = f"{font_index:03d}_{region}_{target_font_path.stem}{shard_suffix}"
+                subgroup_prefix = f"{target_entry.subgroup}_" if target_entry.subgroup else ""
+                folder_name = f"{font_index:03d}_{region}_{subgroup_prefix}{target_font_path.stem}{shard_suffix}"
                 written = 0
                 failed = 0
                 shard_chars = []
@@ -226,8 +299,8 @@ def main() -> None:
                     for cp in shard_codepoints:
                         refs = pick_refs(matched, cp, args.seed + font_index)
                         filename = filename_for_entry(codepoint_to_global_idx[cp], cp)
-                        ok = write_composite(
-                            source_renderer=source_renderer,
+                        ok, source_font_name = write_composite(
+                            source_specs=source_specs,
                             target_renderer=target_renderer,
                             codepoint=cp,
                             refs=refs,
@@ -242,6 +315,7 @@ def main() -> None:
                                 "codepoint": format_codepoint(cp),
                                 "character": chr(cp),
                                 "filename": filename,
+                                "source_font": source_font_name,
                                 "global_char_index": codepoint_to_global_idx[cp],
                                 "reference_codepoints_1": [format_codepoint(r) for r in refs[:4]],
                                 "reference_codepoints_2": [format_codepoint(r) for r in refs[4:]],
@@ -254,9 +328,11 @@ def main() -> None:
                             "dataset_type": "train",
                             "font_index": font_index,
                             "region": region,
+                            "subgroup": target_entry.subgroup,
+                            "kana_only": target_entry.kana_only,
                             "font_name": font_name,
                             "target_font": str(target_font_path),
-                            "source_font": str(source_font_path),
+                            "source_fonts": [str(spec.path) for spec in source_specs],
                             "matched_count": len(matched),
                             "shard_label": shard_label,
                             "shard_index": shard_idx,
@@ -284,7 +360,8 @@ def main() -> None:
                     }
                 )
 
-            eval_folder_name = f"{font_index:03d}_{region}_{target_font_path.stem}_eval"
+            subgroup_prefix = f"{target_entry.subgroup}_" if target_entry.subgroup else ""
+            eval_folder_name = f"{font_index:03d}_{region}_{subgroup_prefix}{target_font_path.stem}_eval"
             eval_written = 0
             eval_failed = 0
             eval_chars = []
@@ -294,8 +371,8 @@ def main() -> None:
                 for cp in eval_candidates:
                     refs = pick_refs(matched, cp, args.seed + 100000 + font_index)
                     filename = filename_for_entry(codepoint_to_global_idx[cp], cp)
-                    ok = write_composite(
-                        source_renderer=source_renderer,
+                    ok, source_font_name = write_composite(
+                        source_specs=source_specs,
                         target_renderer=target_renderer,
                         codepoint=cp,
                         refs=refs,
@@ -310,6 +387,7 @@ def main() -> None:
                             "codepoint": format_codepoint(cp),
                             "character": chr(cp),
                             "filename": filename,
+                            "source_font": source_font_name,
                             "global_char_index": codepoint_to_global_idx[cp],
                             "reference_codepoints_1": [format_codepoint(r) for r in refs[:4]],
                             "reference_codepoints_2": [format_codepoint(r) for r in refs[4:]],
@@ -322,9 +400,11 @@ def main() -> None:
                         "dataset_type": "test_seen_preview",
                         "font_index": font_index,
                         "region": region,
+                        "subgroup": target_entry.subgroup,
+                        "kana_only": target_entry.kana_only,
                         "font_name": font_name,
                         "target_font": str(target_font_path),
-                        "source_font": str(source_font_path),
+                        "source_fonts": [str(spec.path) for spec in source_specs],
                         "matched_count": len(matched),
                         "requested_eval_count": eval_count,
                         "written_count": eval_written,
@@ -346,9 +426,10 @@ def main() -> None:
             font_entries.append(entry)
 
             shard_msg = " + ".join(str(item["planned_count"]) for item in entry["shards"])
+            scope = "kana-only" if target_entry.kana_only else "full"
             print(
                 f"[{font_index:03d}] {region}/{target_font_path.name}: matched={len(matched)} "
-                f"train_shards={shard_msg} eval={eval_written}"
+                f"train_shards={shard_msg} eval={eval_written} scope={scope}"
             )
             font_index += 1
 
