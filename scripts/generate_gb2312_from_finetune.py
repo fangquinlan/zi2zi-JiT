@@ -35,8 +35,10 @@ def parse_args() -> argparse.Namespace:
         "--checkpoint",
         default="run/lora_ft_large_content_style_encoder/checkpoint-latest.pth",
     )
+    parser.add_argument("--dataset-dir", default="")
     parser.add_argument("--train-dir", default="data/mixed_finetune_dataset/train")
-    parser.add_argument("--source-font", default="train/FZNewKai.ttf")
+    parser.add_argument("--source-font", default="")
+    parser.add_argument("--target-font", default="")
     parser.add_argument("--style-folder", default="")
     parser.add_argument("--font-index", type=int, default=None)
     parser.add_argument("--charset", default="gb2312")
@@ -80,6 +82,85 @@ def parse_font_index(folder_name: str) -> int:
     return int(idx_str) - 1
 
 
+def load_dataset_info(dataset_dir: Path) -> dict:
+    dataset_info_path = dataset_dir / "dataset_info.json"
+    if not dataset_info_path.is_file():
+        raise FileNotFoundError(f"dataset_info.json not found under {dataset_dir}")
+    with open(dataset_info_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def normalize_font_identity(value: str) -> str:
+    return Path(value).stem.lower()
+
+
+def resolve_font_entry(dataset_info: dict, target_font: str) -> dict:
+    target_name = normalize_font_identity(target_font)
+    target_basename = Path(target_font).name.lower()
+
+    matches = []
+    for entry in dataset_info.get("fonts", []):
+        entry_target_font = str(entry.get("target_font", ""))
+        entry_font_name = str(entry.get("font_name", ""))
+        candidates = {
+            normalize_font_identity(entry_target_font),
+            Path(entry_target_font).name.lower(),
+            normalize_font_identity(entry_font_name),
+            entry_font_name.lower(),
+        }
+        if target_name in candidates or target_basename in candidates:
+            matches.append(entry)
+
+    if not matches:
+        raise FileNotFoundError(f"Could not find target font '{target_font}' in dataset_info.json")
+    if len(matches) > 1:
+        names = ", ".join(str(item.get("target_font", "")) for item in matches[:5])
+        raise RuntimeError(
+            f"Multiple dataset entries matched target font '{target_font}': {names}. "
+            "Please pass a more specific path or use --style-folder."
+        )
+    return matches[0]
+
+
+def resolve_from_dataset(
+    *,
+    dataset_dir: Path,
+    target_font: str,
+    source_font_arg: str,
+) -> tuple[Path, Path, Path, int]:
+    dataset_info = load_dataset_info(dataset_dir)
+    entry = resolve_font_entry(dataset_info, target_font)
+    train_dir = dataset_dir / "train"
+    if not train_dir.is_dir():
+        raise FileNotFoundError(f"Train dir not found under dataset dir: {train_dir}")
+
+    shards = entry.get("shards") or []
+    if not shards:
+        raise RuntimeError(f"No shard metadata found for target font '{target_font}'")
+    shard_folder = str(shards[0].get("folder", ""))
+    if not shard_folder:
+        raise RuntimeError(f"First shard for target font '{target_font}' is missing a folder name")
+    style_folder = train_dir / shard_folder
+    if not style_folder.is_dir():
+        raise FileNotFoundError(f"Style folder referenced by dataset_info.json not found: {style_folder}")
+
+    if source_font_arg:
+        source_font = Path(source_font_arg)
+        if not source_font.is_absolute():
+            source_font = (REPO_ROOT / source_font_arg).resolve()
+    else:
+        source_fonts = entry.get("source_fonts") or []
+        if not source_fonts:
+            raise RuntimeError(f"No source_fonts recorded for target font '{target_font}'")
+        source_font = Path(str(source_fonts[0])).resolve()
+
+    if not source_font.is_file():
+        raise FileNotFoundError(f"Source font not found: {source_font}")
+
+    style_font_index = int(entry["font_index"]) - 1
+    return train_dir, style_folder, source_font, style_font_index
+
+
 def resolve_style_folder(train_dir: Path, style_folder: str, font_index: int | None) -> Path:
     if bool(style_folder) == (font_index is not None):
         raise ValueError("Specify exactly one of --style-folder or --font-index.")
@@ -96,6 +177,8 @@ def resolve_style_folder(train_dir: Path, style_folder: str, font_index: int | N
                 and (
                     p.name == style_folder
                     or p.name.split("_", 1)[-1] == style_folder
+                    or p.name.endswith(f"_{style_folder}")
+                    or f"_{style_folder}_" in p.name
                 )
             )
             if not candidates:
@@ -162,6 +245,7 @@ def build_inference_npz(
     ref_index: int,
     reference_mode: str,
     output_path: Path,
+    style_font_index_override: int | None = None,
 ) -> dict:
     source_font_obj, source_font_path = load_font(str(source_font))
     renderable_cps = sorted(get_charset_codepoints(charset) & get_font_codepoints(source_font_obj))
@@ -170,7 +254,7 @@ def build_inference_npz(
 
     train_images = collect_train_images(style_folder)
     style_refs = build_style_reference_pool(train_images, ref_index=ref_index, reference_mode=reference_mode)
-    style_font_index = parse_font_index(style_folder.name)
+    style_font_index = style_font_index_override if style_font_index_override is not None else parse_font_index(style_folder.name)
     source_renderer = GlyphRenderer(str(source_font_path), 256)
 
     num_samples = len(renderable_cps)
@@ -217,19 +301,34 @@ def main() -> None:
     args = parse_args()
 
     checkpoint = (REPO_ROOT / args.checkpoint).resolve()
-    train_dir = (REPO_ROOT / args.train_dir).resolve()
-    source_font = (REPO_ROOT / args.source_font).resolve()
     output_dir = (REPO_ROOT / args.output_dir).resolve()
     temp_npz = Path(args.temp_npz).resolve() if args.temp_npz else (output_dir / "_gb2312_inference.npz")
 
     if not checkpoint.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
-    if not train_dir.is_dir():
-        raise FileNotFoundError(f"Train dir not found: {train_dir}")
-    if not source_font.is_file():
-        raise FileNotFoundError(f"Source font not found: {source_font}")
+    style_font_index_override: int | None = None
+    if args.dataset_dir:
+        dataset_dir = (REPO_ROOT / args.dataset_dir).resolve()
+        if not dataset_dir.is_dir():
+            raise FileNotFoundError(f"Dataset dir not found: {dataset_dir}")
+        if not args.target_font:
+            raise ValueError("--target-font is required when using --dataset-dir.")
+        train_dir, style_folder, source_font, style_font_index_override = resolve_from_dataset(
+            dataset_dir=dataset_dir,
+            target_font=args.target_font,
+            source_font_arg=args.source_font,
+        )
+    else:
+        train_dir = (REPO_ROOT / args.train_dir).resolve()
+        if not train_dir.is_dir():
+            raise FileNotFoundError(f"Train dir not found: {train_dir}")
+        if not args.source_font:
+            raise ValueError("--source-font is required when --dataset-dir is not used.")
+        source_font = (REPO_ROOT / args.source_font).resolve()
+        if not source_font.is_file():
+            raise FileNotFoundError(f"Source font not found: {source_font}")
+        style_folder = resolve_style_folder(train_dir, args.style_folder, args.font_index)
 
-    style_folder = resolve_style_folder(train_dir, args.style_folder, args.font_index)
     manifest = build_inference_npz(
         train_dir=train_dir,
         style_folder=style_folder,
@@ -238,6 +337,7 @@ def main() -> None:
         ref_index=args.ref_index,
         reference_mode=args.reference_mode,
         output_path=temp_npz,
+        style_font_index_override=style_font_index_override,
     )
     manifest["checkpoint"] = str(checkpoint)
 
@@ -251,6 +351,10 @@ def main() -> None:
     print(f"  style_folder  = {style_folder}")
     print(f"  font_index    = {manifest['style_font_index']}")
     print(f"  source_font   = {source_font}")
+    if args.target_font:
+        print(f"  target_font   = {args.target_font}")
+    if args.dataset_dir:
+        print(f"  dataset_dir   = {(REPO_ROOT / args.dataset_dir).resolve()}")
     print(f"  charset       = {args.charset}")
     print(f"  num_samples   = {manifest['num_samples']}")
     print(f"  ref_index     = {args.ref_index}")
